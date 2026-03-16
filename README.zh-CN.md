@@ -53,7 +53,7 @@ opencli setup
 ```
 
 交互式 TUI 会：
-- 🔍 从 Chrome 自动发现 Token（无需手动复制）
+- 🔍 从 Chrome 自动发现 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`（无需手动复制）
 - ☑️ 显示所有支持的工具（Codex、Cursor、Claude Code、Gemini CLI 等）
 - ✏️ 只更新你选中的文件（空格切换，回车确认）
 

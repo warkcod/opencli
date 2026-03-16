@@ -53,7 +53,7 @@ opencli setup
 ```
 
 The interactive TUI will:
-- 🔍 Auto-discover your token from Chrome (no manual copy needed)
+- 🔍 Auto-discover `PLAYWRIGHT_MCP_EXTENSION_TOKEN` from Chrome (no manual copy needed)
 - ☑️ Show all detected tools (Codex, Cursor, Claude Code, Gemini CLI, etc.)
 - ✏️ Update only the files you select (Space to toggle, Enter to confirm)
 
