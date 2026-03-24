@@ -235,6 +235,7 @@ function isDebuggableUrl(url?: string): boolean {
   return !url.startsWith('chrome://') && !url.startsWith('chrome-extension://');
 }
 
+/** Minimal URL normalization for same-page comparison: root slash + default port only. */
 function normalizeUrlForComparison(url?: string): string {
   if (!url) return '';
   try {
@@ -335,11 +336,10 @@ async function handleNavigate(cmd: Command, workspace: string): Promise<Result> 
   const tabId = await resolveTabId(cmd.tabId, workspace);
 
   const beforeTab = await chrome.tabs.get(tabId);
+  const beforeNormalized = normalizeUrlForComparison(beforeTab.url);
   const targetUrl = cmd.url;
 
-  // Fast-path: the tab is already at the target URL and fully loaded.
-  // This avoids a redundant same-URL navigation that would otherwise wait
-  // for a URL-change event that never arrives.
+  // Fast-path: tab is already at the target URL and fully loaded.
   if (beforeTab.status === 'complete' && isTargetUrl(beforeTab.url, targetUrl)) {
     return {
       id: cmd.id,
@@ -358,9 +358,9 @@ async function handleNavigate(cmd: Command, workspace: string): Promise<Result> 
 
   await chrome.tabs.update(tabId, { url: targetUrl });
 
-  // Wait until the tab has actually reached the target URL and completed
-  // loading. This handles same-URL/canonicalized navigations like
-  // https://example.com → https://example.com/.
+  // Wait until navigation completes. Resolve when status is 'complete' AND either:
+  // - the URL matches the target (handles same-URL / canonicalized navigations), OR
+  // - the URL differs from the pre-navigation URL (handles redirects).
   let timedOut = false;
   await new Promise<void>((resolve) => {
     let settled = false;
@@ -376,9 +376,13 @@ async function handleNavigate(cmd: Command, workspace: string): Promise<Result> 
       resolve();
     };
 
+    const isNavigationDone = (url: string | undefined): boolean => {
+      return isTargetUrl(url, targetUrl) || normalizeUrlForComparison(url) !== beforeNormalized;
+    };
+
     const listener = (id: number, info: chrome.tabs.TabChangeInfo, tab: chrome.tabs.Tab) => {
       if (id !== tabId) return;
-      if (info.status === 'complete' && isTargetUrl(tab.url ?? info.url, targetUrl)) {
+      if (info.status === 'complete' && isNavigationDone(tab.url ?? info.url)) {
         finish();
       }
     };
@@ -388,7 +392,7 @@ async function handleNavigate(cmd: Command, workspace: string): Promise<Result> 
     checkTimer = setTimeout(async () => {
       try {
         const currentTab = await chrome.tabs.get(tabId);
-        if (currentTab.status === 'complete' && isTargetUrl(currentTab.url, targetUrl)) {
+        if (currentTab.status === 'complete' && isNavigationDone(currentTab.url)) {
           finish();
         }
       } catch { /* tab gone */ }
