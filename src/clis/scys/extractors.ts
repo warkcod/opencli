@@ -36,7 +36,7 @@ export async function ensureScysLogin(page: IPage): Promise<void> {
       const loginByDom = !!document.querySelector(
         '.login-container, .login-box, .qrcode-login, [class*="login"], input[type="password"]'
       );
-      const routeLooksLikeLogin = /\/login/.test(location.pathname);
+      const routeLooksLikeLogin = location.pathname.includes('/login');
       return { loginByText, loginByDom, routeLooksLikeLogin };
     })()
   `) as { loginByText?: boolean; loginByDom?: boolean; routeLooksLikeLogin?: boolean } | null;
@@ -248,7 +248,7 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
       const abs = (href) => {
         if (!href) return '';
-        if (/^https?:\/\//.test(href)) return href;
+        if (href.startsWith('http://') || href.startsWith('https://')) return href;
         if (href.startsWith('/')) return location.origin + href;
         return '';
       };
@@ -331,7 +331,7 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
       const abs = (href) => {
         if (!href) return '';
-        if (/^https?:\/\//.test(href)) return href;
+        if (href.startsWith('http://') || href.startsWith('https://')) return href;
         if (href.startsWith('/')) return location.origin + href;
         return '';
       };
