@@ -21,3 +21,19 @@
   tags: [docker, containers, devops]
   install:
     mac: "brew install --cask docker"
+
+- name: lark-cli
+  binary: lark-cli
+  description: "Lark/Feishu CLI — messages, documents, spreadsheets, calendar, tasks and 200+ commands for AI agents"
+  homepage: "https://github.com/larksuite/cli"
+  tags: [lark, feishu, collaboration, productivity, ai-agent]
+  install:
+    default: "npm install -g @larksuite/cli"
+
+- name: vercel
+  binary: vercel
+  description: "Vercel CLI — deploy projects, manage domains, env vars, logs and serverless functions"
+  homepage: "https://vercel.com/docs/cli"
+  tags: [vercel, deployment, serverless, frontend, devops]
+  install:
+    default: "npm install -g vercel"
