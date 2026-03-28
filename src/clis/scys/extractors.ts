@@ -32,6 +32,14 @@ interface ExtractOptions {
 }
 
 const SCYS_DOMAIN = 'scys.com';
+const SCYS_TEXT_FIXUPS: Array<[RegExp, string]> = [
+  [/\bCur\s*or\b/g, 'Cursor'],
+  [/\bBu\s*ine\b/g, 'Business'],
+  [/\bJava\s*cript\b/g, 'Javascript'],
+  [/\bSupaba\s*e\b/g, 'Supabase'],
+  [/\bcreen\s*haring\b/gi, 'screensharing'],
+  [/\bfa\s*t3d\b/gi, 'fast3d'],
+];
 
 async function gotoAndWait(page: IPage, url: string, waitSeconds: number): Promise<void> {
   await page.goto(url);
@@ -74,9 +82,18 @@ function formatScysInteractions(like: unknown, comments: unknown, favorites: unk
 }
 
 function trimWithLimit(value: unknown, maxLength: number): string {
-  const text = cleanText(value);
+  const text = polishScysText(value);
   if (!text) return '';
   return text.slice(0, maxLength);
+}
+
+function polishScysText(value: unknown): string {
+  let text = cleanText(value);
+  if (!text) return '';
+  for (const [pattern, replacement] of SCYS_TEXT_FIXUPS) {
+    text = text.replace(pattern, replacement);
+  }
+  return text;
 }
 
 export async function ensureScysFeedReady(page: IPage): Promise<void> {
@@ -157,12 +174,12 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
       };
 
       const contentEl = pickFirstEl([
-        '.vc-course-main',
-        '.course-content-container',
-        '.vc-course-content',
-        '.document-container',
         '.feishu-doc-content',
+        '.document-container',
+        '.vc-course-content',
+        '.course-content-container',
         '.content-container',
+        '.vc-course-main',
       ]);
 
       const chapterItems = Array.from(document.querySelectorAll('.vc-chapter-item[data-item-id], .chapter-list .vc-chapter-item')).map((el) => {
@@ -179,6 +196,18 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
         const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
         return { id, title, status, isCurrent };
       }).filter((row) => row.title);
+
+      const activeChapterEl =
+        document.querySelector('.vc-chapter-item.is-active, .vc-chapter-item.is-current, .vc-chapter-item.active') ||
+        null;
+      const activeGroupTitle = clean(
+        activeChapterEl?.closest('.vc-chapter-group')?.querySelector('.group-title, .chapter-group-title')?.textContent || ''
+      );
+      const activeSectionTitle = clean(
+        activeChapterEl?.closest('.catalogue-section')?.querySelector('.section-title')?.textContent || ''
+      );
+      const activeChapterTitle = clean(activeChapterEl?.querySelector('.chapter-title')?.textContent || '');
+      const catalogBreadcrumb = [activeSectionTitle, activeGroupTitle, activeChapterTitle].filter(Boolean);
 
       const breadcrumbTexts = Array.from(
         document.querySelectorAll(
@@ -219,7 +248,7 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
         courseTitle,
         chapterTitle: chapterTitleFromContent,
         currentChapter,
-        breadcrumb: breadcrumbTexts,
+        breadcrumb: catalogBreadcrumb.length >= 2 ? catalogBreadcrumb : breadcrumbTexts,
         content: clean(contentEl?.innerText || ''),
         chapters: chapterItems,
         chapterId,
@@ -242,11 +271,11 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
   }
 
   const courseId = extractScysCourseId(url);
-  const content = cleanText(payload.content ?? '').slice(0, maxLength);
+  const content = polishScysText(payload.content ?? '').slice(0, maxLength);
   const chapters = Array.isArray(payload.chapters) ? payload.chapters : [];
   const tocSummary = chapters
     .slice(0, 8)
-    .map((item, index) => `${index + 1}.${cleanText(item.title)}${item.id ? `(${item.id})` : ''}`)
+    .map((item, index) => `${index + 1}.${polishScysText(item.title)}${item.id ? `(${item.id})` : ''}`)
     .join(' | ');
 
   if (!content && chapters.length === 0) {
@@ -254,11 +283,11 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
   }
 
   return {
-    course_title: cleanText(payload.courseTitle ?? ''),
-    chapter_title: cleanText(payload.currentChapter ?? payload.chapterTitle ?? ''),
-    breadcrumb: (payload.breadcrumb ?? []).map((s) => cleanText(s)).filter(Boolean).join(' > '),
+    course_title: polishScysText(payload.courseTitle ?? ''),
+    chapter_title: polishScysText(payload.currentChapter ?? payload.chapterTitle ?? ''),
+    breadcrumb: (payload.breadcrumb ?? []).map((s) => polishScysText(s)).filter(Boolean).join(' > '),
     content,
-    chapter_id: cleanText(payload.chapterId ?? ''),
+    chapter_id: polishScysText(payload.chapterId ?? ''),
     course_id: courseId,
     toc_summary: tocSummary,
     url: normalizeScysUrl(payload.pageUrl || url),
@@ -418,12 +447,12 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
       const entityType = cleanText(topic.entityType || 'xq_topic');
       return {
         rank: index + 1,
-        author: cleanText(user.name),
+        author: polishScysText(user.name),
         time: formatScysRelativeTime(topic.gmtCreate),
         badge: topic.isDigested ? '精华' : '',
-        title: cleanText(stripScysRichText(topic.showTitle)),
+        title: polishScysText(stripScysRichText(topic.showTitle)),
         preview: trimWithLimit(stripScysRichText(topic.articleContent), maxLength),
-        tags: Array.from(new Set(menuValues)).join(', '),
+        tags: Array.from(new Set(menuValues.map((v: string) => polishScysText(v)).filter(Boolean))).join(', '),
         interactions: formatScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount),
         link: pickPreferredScysLink([
           item?.detailUrl,
@@ -501,12 +530,12 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
       const [authorByLine, timeByLine] = userLine.split('·').map((part) => cleanText(part));
       return {
         rank: index + 1,
-        author: cleanText(row.author ?? authorByLine),
+        author: polishScysText(row.author ?? authorByLine),
         time: cleanText(row.time ?? timeByLine),
-        badge: cleanText(row.badge ?? ''),
-        title: cleanText(row.title ?? '').replace(/^(精华|热门)\s*/, ''),
+        badge: polishScysText(row.badge ?? ''),
+        title: polishScysText(row.title ?? '').replace(/^(精华|热门)\s*/, ''),
         preview: trimWithLimit(row.preview ?? '', maxLength),
-        tags: Array.from(new Set((row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean))).join(', '),
+        tags: Array.from(new Set((row.tags ?? []).map((tag: string) => polishScysText(tag)).filter(Boolean))).join(', '),
         interactions: formatScysInteractions(undefined, undefined, undefined, row.interactions || row.meta_line),
         link: pickPreferredScysLink(row.links ?? []),
       };
@@ -592,13 +621,13 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
 
       return {
         rank: index + 1,
-        author: cleanText(user.name),
+        author: polishScysText(user.name),
         time: formatScysRelativeTime(topic.gmtCreate),
-        flags: flags.join(', '),
-        title: cleanText(stripScysRichText(topic.showTitle)),
-        content: cleanText(stripScysRichText(topic.articleContent)),
-        ai_summary: parseAiSummaryText(topic.aiSummaryContent),
-        tags: tags.join(', '),
+        flags: flags.map((f: string) => polishScysText(f)).filter(Boolean).join(', '),
+        title: polishScysText(stripScysRichText(topic.showTitle)),
+        content: polishScysText(stripScysRichText(topic.articleContent)),
+        ai_summary: polishScysText(parseAiSummaryText(topic.aiSummaryContent)),
+        tags: tags.map((t: string) => polishScysText(t)).filter(Boolean).join(', '),
         interactions: `点赞${likeCount} 评论${commentCount} 收藏${favoriteCount}`,
         link: cleanText(item.detailUrl) || buildScysTopicLink(entityType, topicId),
         topic_id: topicId,
@@ -658,16 +687,16 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
     normalized = (rows ?? []).slice(0, limit).map((row, index) => {
       const imageUrls = (row.image_urls ?? []).map((u) => cleanText(u)).filter(Boolean);
       const topicId = inferTopicIdFromImageUrls(imageUrls);
-      const tags = Array.from(new Set((row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean)));
+      const tags = Array.from(new Set((row.tags ?? []).map((tag: string) => cleanText(tag)).filter(Boolean)));
       return {
         rank: index + 1,
-        author: cleanText(row.author ?? ''),
+        author: polishScysText(row.author ?? ''),
         time: cleanText(row.time ?? ''),
-        flags: (row.flags ?? []).map((f) => cleanText(f)).filter(Boolean).join(', '),
-        title: cleanText(stripScysRichText(row.title ?? '')),
-        content: cleanText(stripScysRichText(row.content ?? '')),
-        ai_summary: cleanText(stripScysRichText(row.ai_summary ?? '')),
-        tags: tags.join(', '),
+        flags: (row.flags ?? []).map((f: string) => polishScysText(f)).filter(Boolean).join(', '),
+        title: polishScysText(stripScysRichText(row.title ?? '')),
+        content: polishScysText(stripScysRichText(row.content ?? '')),
+        ai_summary: polishScysText(stripScysRichText(row.ai_summary ?? '')),
+        tags: tags.map((tag: string) => polishScysText(tag)).filter(Boolean).join(', '),
         interactions: extractInteractions(row.interactions ?? ''),
         link: cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId),
         topic_id: topicId,
@@ -776,13 +805,13 @@ export async function extractScysActivity(page: IPage, inputUrl: string, opts: E
   }
 
   return {
-    title: cleanText(payload.title),
-    subtitle: cleanText(payload.subtitle),
-    tabs: (payload.tabs ?? []).map((tab) => cleanText(tab)).filter(Boolean),
+    title: polishScysText(payload.title),
+    subtitle: polishScysText(payload.subtitle),
+    tabs: (payload.tabs ?? []).map((tab) => polishScysText(tab)).filter(Boolean),
     stages: (payload.stages ?? []).map((stage) => ({
-      title: cleanText(stage.title),
-      duration: cleanText(stage.duration),
-      tasks: (stage.tasks ?? []).map((task) => cleanText(task)).filter(Boolean),
+      title: polishScysText(stage.title),
+      duration: polishScysText(stage.duration),
+      tasks: (stage.tasks ?? []).map((task) => polishScysText(task)).filter(Boolean),
     })),
     url: normalizeScysUrl(payload.url || url),
   };
