@@ -30,21 +30,23 @@ cli({
     const pageType = detectScysPageType(url);
 
     if (pageType === 'course') {
-      const row = await extractScysCourse(page, url, { waitSeconds, maxLength });
-      return { page_type: pageType, ...row };
+      const data = await extractScysCourse(page, url, { waitSeconds, maxLength });
+      return { page_type: pageType, data };
     }
 
     if (pageType === 'feed') {
-      return extractScysFeed(page, url, { waitSeconds, limit, maxLength });
+      const data = await extractScysFeed(page, url, { waitSeconds, limit, maxLength });
+      return { page_type: pageType, data };
     }
 
     if (pageType === 'opportunity') {
-      return extractScysOpportunity(page, url, { waitSeconds, limit, maxLength });
+      const data = await extractScysOpportunity(page, url, { waitSeconds, limit, maxLength });
+      return { page_type: pageType, data };
     }
 
     if (pageType === 'activity') {
-      const row = await extractScysActivity(page, url, { waitSeconds, maxLength });
-      return { page_type: pageType, ...row, tabs: row.tabs.join(' | '), stages: JSON.stringify(row.stages) };
+      const data = await extractScysActivity(page, url, { waitSeconds, maxLength });
+      return { page_type: pageType, data };
     }
 
     throw new ArgumentError(

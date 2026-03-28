@@ -14,14 +14,8 @@ cli({
   ],
   columns: ['title', 'subtitle', 'tabs', 'stages', 'url'],
   func: async (page, kwargs) => {
-    const result = await extractScysActivity(page, String(kwargs.url), {
+    return extractScysActivity(page, String(kwargs.url), {
       waitSeconds: Number(kwargs.wait ?? 3),
     });
-
-    return {
-      ...result,
-      tabs: result.tabs.join(' | '),
-      stages: JSON.stringify(result.stages),
-    };
   },
 });

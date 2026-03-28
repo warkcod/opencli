@@ -20,6 +20,7 @@ import {
   inferTopicIdFromImageUrls,
   normalizeOpportunityTab,
   parseAiSummaryText,
+  stripScysRichText,
   splitOpportunityFlagsAndTags,
 } from './opportunity-utils.js';
 
@@ -37,21 +38,92 @@ async function gotoAndWait(page: IPage, url: string, waitSeconds: number): Promi
   await page.wait(waitSeconds);
 }
 
+function pickPreferredScysLink(candidates: Array<unknown>): string {
+  const links = Array.from(
+    new Set(
+      candidates
+        .map((value) => cleanText(value))
+        .filter(Boolean)
+        .map((value) => value.replace(/\s+/g, ''))
+    )
+  );
+  if (links.length === 0) return '';
+
+  const detail = links.find((link) => /^https?:\/\/(?:www\.)?scys\.com\/articleDetail\//i.test(link));
+  if (detail) return detail;
+
+  const internal = links.find((link) => /^https?:\/\/(?:www\.)?scys\.com\//i.test(link));
+  if (internal) return internal;
+
+  return links[0] ?? '';
+}
+
+function formatScysInteractions(like: unknown, comments: unknown, favorites: unknown, fallback?: unknown): string {
+  const likeCount = Number(like);
+  const commentCount = Number(comments);
+  const favoriteCount = Number(favorites);
+  if ([likeCount, commentCount, favoriteCount].every((n) => Number.isFinite(n) && n >= 0)) {
+    return `点赞${Math.floor(likeCount)} 评论${Math.floor(commentCount)} 收藏${Math.floor(favoriteCount)}`;
+  }
+
+  const text = cleanText(fallback);
+  if (!text) return '';
+  const pieces = text.match(/[0-9]+(?:\.[0-9]+)?(?:万|亿)?/g);
+  if (!pieces || pieces.length === 0) return text;
+  return `点赞${pieces[0] ?? '0'} 评论${pieces[1] ?? '0'} 收藏${pieces[2] ?? '0'}`;
+}
+
+function trimWithLimit(value: unknown, maxLength: number): string {
+  const text = cleanText(value);
+  if (!text) return '';
+  return text.slice(0, maxLength);
+}
+
+export async function ensureScysFeedReady(page: IPage): Promise<void> {
+  await page.evaluate(`
+    (async () => {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 12; i += 1) {
+        const hasCards = document.querySelectorAll('.post-list-container .compact-card, .compact-card').length > 0;
+        const hasControls = document.querySelector('.vc-secondary-filter .filter-item, .titles.selector .button, .select.wrap .button');
+        if (hasCards || hasControls) return;
+        await sleep(250);
+      }
+    })()
+  `);
+}
+
 export async function ensureScysLogin(page: IPage): Promise<void> {
   const state = await page.evaluate(`
     (() => {
       const text = (document.body?.innerText || '').slice(0, 12000);
-      const loginByText = /扫码登录|手机号登录|验证码登录|登录后|请登录/.test(text);
+      const strongLoginText = /扫码登录|手机号登录|验证码登录|微信登录|账号登录|登录\\/注册/.test(text);
+      const genericLoginText = /请登录|登录后/.test(text);
       const loginByDom = !!document.querySelector(
-        '.login-container, .login-box, .qrcode-login, [class*="login"], input[type="password"]'
+        '.login-container, .login-box, .qrcode-login, form[action*="login"], input[type="password"], input[type="tel"][placeholder*="手机号"]'
+      );
+      const hasContentSignals = !!document.querySelector(
+        '.course-detail-page, .vc-course-main, .post-list-container, .compact-card, .activity-left, .week-card, .vc-secondary-filter'
       );
       const routeLooksLikeLogin = location.pathname.includes('/login');
-      return { loginByText, loginByDom, routeLooksLikeLogin };
+      return { strongLoginText, genericLoginText, loginByDom, hasContentSignals, routeLooksLikeLogin };
     })()
-  `) as { loginByText?: boolean; loginByDom?: boolean; routeLooksLikeLogin?: boolean } | null;
+  `) as {
+    strongLoginText?: boolean;
+    genericLoginText?: boolean;
+    loginByDom?: boolean;
+    hasContentSignals?: boolean;
+    routeLooksLikeLogin?: boolean;
+  } | null;
 
   if (!state) return;
-  if (state.loginByText || state.routeLooksLikeLogin) {
+  const shouldBlock =
+    !!state.routeLooksLikeLogin
+    || !!state.loginByDom
+    || (!!state.strongLoginText && !state.hasContentSignals)
+    || (!!state.genericLoginText && !!state.loginByDom && !state.hasContentSignals);
+
+  if (shouldBlock) {
     throw new AuthRequiredError(SCYS_DOMAIN, 'SCYS content requires a logged-in browser session');
   }
 }
@@ -109,21 +181,43 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
       }).filter((row) => row.title);
 
       const breadcrumbTexts = Array.from(
-        document.querySelectorAll('.breadcrumb a, .breadcrumb span, .vc-breadcrumb a, .vc-breadcrumb span')
+        document.querySelectorAll(
+          '.simple-catalog-toggle .breadcrumb-item, .breadcrumb-item, .breadcrumb a, .breadcrumb span, .vc-breadcrumb a, .vc-breadcrumb span'
+        )
       )
         .map((el) => clean(el.textContent || ''))
         .filter(Boolean);
 
-      const title = pickFirstText(['h1', '.course-title', '.vc-course-title']) || clean(document.title || '');
+      const courseTitle =
+        pickFirstText([
+          '.vc-course-main .course-name',
+          '.course-name',
+          '.vc-course-sidebar .course-title',
+          '.course-header .course-title',
+          '.course-title',
+        ]) ||
+        clean((document.title || '').split(' - ')[0] || '');
+
+      const chapterTitleFromContent = pickFirstText([
+        '.vc-course-content .content-title',
+        '.course-content-container .content-title',
+        '.content-title',
+        '.current-chapter',
+        '.vc-course-main h1',
+        'h1',
+      ]);
+
       const currentChapter =
         chapterItems.find((item) => item.isCurrent)?.title ||
-        pickFirstText(['.vc-chapter-item.is-active .chapter-title', '.vc-chapter-item.active .chapter-title', '.current-chapter', 'h2']);
+        pickFirstText(['.vc-chapter-item.is-active .chapter-title', '.vc-chapter-item.active .chapter-title']) ||
+        chapterTitleFromContent;
 
       const chapterIdFromQuery = new URL(location.href).searchParams.get('chapterId') || '';
       const chapterId = chapterIdFromQuery || chapterItems.find((item) => item.isCurrent)?.id || '';
 
       return {
-        title,
+        courseTitle,
+        chapterTitle: chapterTitleFromContent,
         currentChapter,
         breadcrumb: breadcrumbTexts,
         content: clean(contentEl?.innerText || ''),
@@ -133,7 +227,8 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
       };
     })()
   `) as {
-    title?: string;
+    courseTitle?: string;
+    chapterTitle?: string;
     currentChapter?: string;
     breadcrumb?: string[];
     content?: string;
@@ -159,8 +254,8 @@ export async function extractScysCourse(page: IPage, inputUrl: string, opts: Ext
   }
 
   return {
-    course_title: cleanText(payload.title ?? ''),
-    chapter_title: cleanText(payload.currentChapter ?? ''),
+    course_title: cleanText(payload.courseTitle ?? ''),
+    chapter_title: cleanText(payload.currentChapter ?? payload.chapterTitle ?? ''),
     breadcrumb: (payload.breadcrumb ?? []).map((s) => cleanText(s)).filter(Boolean).join(' > '),
     content,
     chapter_id: cleanText(payload.chapterId ?? ''),
@@ -247,77 +342,176 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
   const url = normalizeScysUrl(inputUrl);
   const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 3));
   const limit = Math.max(1, Number(opts.limit ?? 20));
+  const maxLength = Math.max(120, Number(opts.maxLength ?? 600));
 
   await gotoAndWait(page, url, waitSeconds);
-  await page.autoScroll({ times: 2, delayMs: 1200 });
   await ensureScysLogin(page);
+  await ensureScysFeedReady(page);
 
-  const rows = await page.evaluate(`
-    (() => {
-      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-      const abs = (href) => {
-        if (!href) return '';
-        if (href.startsWith('http://') || href.startsWith('https://')) return href;
-        if (href.startsWith('/')) return location.origin + href;
-        return '';
-      };
+  // API-first extraction:
+  // feed pages use /shengcai-web/client/homePage/searchTopic as list source.
+  await page.installInterceptor('shengcai-web/client');
+  await page.evaluate(`
+    (async () => {
+      const clean = (v) => (v || '').replace(/\\s+/g, ' ').trim();
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const isActive = (el) => /active|is-active|selected/.test(el?.className || '');
 
-      const cards = Array.from(document.querySelectorAll('.post-list-container .compact-card, .compact-card'));
-      return cards.map((card) => {
-        const author = clean(
-          card.querySelector('.user-line .name, .user-line .nickname, .author-name')?.textContent ||
-          card.querySelector('.user-line')?.textContent ||
-          ''
-        );
-        const time = clean(card.querySelector('.user-line .time, .meta-line .time, .meta-line')?.textContent || '');
-        const badge = clean(card.querySelector('.vc-essence-badge, .badge')?.textContent || '');
-        const title = clean(card.querySelector('.title-text, .title-line .title, .title-line')?.textContent || '');
-        const preview = clean(card.querySelector('.content-preview, .preview, .content')?.textContent || '');
-        const tags = Array.from(card.querySelectorAll('.tags .tag, .tags span, .tag-list .tag'))
-          .map((el) => clean(el.textContent || ''))
-          .filter(Boolean);
-        const interactions = clean(card.querySelector('.compact-interactions, .interactions')?.textContent || '');
+      const search = new URL(location.href).searchParams;
+      const expectedFilter = (search.get('filter') || '').toLowerCase();
 
-        const links = Array.from(card.querySelectorAll('a[href]'))
-          .map((el) => abs(el.getAttribute('href') || ''))
-          .filter(Boolean);
+      const homeFilters = Array.from(document.querySelectorAll('.vc-secondary-filter .filter-item'));
+      if (homeFilters.length > 0) {
+        const targetLabel = expectedFilter === 'essence' ? '精华' : '全部';
+        const target = homeFilters.find((el) => clean(el.textContent || '') === targetLabel) || homeFilters[0];
+        const active = homeFilters.find((el) => isActive(el));
+        const alt = homeFilters.find((el) => el !== target);
+        if (active && target && active === target && alt) {
+          alt.click();
+          await sleep(900);
+        }
+        if (target) {
+          target.click();
+          await sleep(1200);
+        }
+      }
 
-        const uniqLinks = Array.from(new Set(links));
+      const profileTabs = Array.from(document.querySelectorAll('.titles.selector .button, .select.wrap .button, .button'))
+        .filter((el) => ['帖子', '收藏'].includes(clean(el.textContent || '')));
+      if (profileTabs.length > 0) {
+        const posts = profileTabs.find((el) => clean(el.textContent || '') === '帖子') || profileTabs[0];
+        const alt = profileTabs.find((el) => el !== posts);
+        if (posts && isActive(posts) && alt) {
+          alt.click();
+          await sleep(1000);
+        }
+        if (posts) {
+          posts.click();
+          await sleep(1200);
+        }
+      }
 
-        return {
-          author,
-          time,
-          badge,
-          title,
-          preview,
-          tags,
-          interactions,
-          link: uniqLinks[0] || '',
-        };
-      }).filter((item) => item.title || item.preview);
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(800);
+      window.scrollTo(0, 0);
+      await sleep(300);
     })()
-  `) as Array<{
-    author?: string;
-    time?: string;
-    badge?: string;
-    title?: string;
-    preview?: string;
-    tags?: string[];
-    interactions?: string;
-    link?: string;
-  }> | null;
+  `);
 
-  const normalized = (rows ?? []).slice(0, limit).map((row, index) => ({
-    rank: index + 1,
-    author: cleanText(row.author ?? ''),
-    time: cleanText(row.time ?? ''),
-    badge: cleanText(row.badge ?? ''),
-    title: cleanText(row.title ?? ''),
-    preview: cleanText(row.preview ?? ''),
-    tags: (row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean).join(', '),
-    interactions: extractInteractions(row.interactions ?? ''),
-    link: cleanText(row.link ?? ''),
-  }));
+  const intercepted = await page.getInterceptedRequests();
+  const latest = intercepted
+    .filter((entry) => {
+      const data = (entry as any)?.data;
+      return data && Array.isArray(data.items) && data.items.some((item: any) => item?.topicDTO);
+    })
+    .at(-1) as any;
+
+  let normalized: ScysFeedRow[] = [];
+  if (latest?.data?.items?.length) {
+    normalized = latest.data.items.slice(0, limit).map((item: any, index: number) => {
+      const topic = item?.topicDTO ?? {};
+      const user = item?.topicUserDTO ?? {};
+      const menuValues = Array.isArray(topic.menuList)
+        ? topic.menuList.map((m: any) => cleanText(m?.value)).filter(Boolean)
+        : [];
+      const topicId = cleanText(topic.topicId || topic.entityId);
+      const entityType = cleanText(topic.entityType || 'xq_topic');
+      return {
+        rank: index + 1,
+        author: cleanText(user.name),
+        time: formatScysRelativeTime(topic.gmtCreate),
+        badge: topic.isDigested ? '精华' : '',
+        title: cleanText(stripScysRichText(topic.showTitle)),
+        preview: trimWithLimit(stripScysRichText(topic.articleContent), maxLength),
+        tags: Array.from(new Set(menuValues)).join(', '),
+        interactions: formatScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount),
+        link: pickPreferredScysLink([
+          item?.detailUrl,
+          buildScysTopicLink(entityType, topicId),
+          topic?.externalLink,
+        ]),
+      };
+    }).filter((row: ScysFeedRow) => row.title || row.preview);
+  }
+
+  // DOM fallback for cases where interceptor is blocked or request timing misses.
+  if (normalized.length === 0) {
+    await page.autoScroll({ times: 2, delayMs: 1200 });
+    const rows = await page.evaluate(`
+      (() => {
+        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+        const abs = (href) => {
+          if (!href) return '';
+          if (href.startsWith('http://') || href.startsWith('https://')) return href;
+          if (href.startsWith('/')) return location.origin + href;
+          return '';
+        };
+
+        const cards = Array.from(document.querySelectorAll('.post-list-container .compact-card, .compact-card'));
+        return cards.map((card) => {
+          const userLine = clean(card.querySelector('.user-line')?.textContent || '');
+          const author = clean(
+            card.querySelector('.user-line .user-name, .avatar-group .user-name, .author-name')?.textContent || ''
+          );
+          const time = clean(card.querySelector('.user-line .time-label, .user-line .time')?.textContent || '');
+          const badge = clean(card.querySelector('.vc-essence-badge, .badge')?.textContent || '');
+          const title = clean(card.querySelector('.title-text, .title-line .title, .title-line')?.textContent || '');
+          const preview = clean(card.querySelector('.content-preview, .preview, .content')?.textContent || '');
+          const tags = Array.from(card.querySelectorAll('.tags .tag, .tags span, .tag-list .tag'))
+            .map((el) => clean(el.textContent || ''))
+            .filter(Boolean);
+          const interactions = clean(card.querySelector('.compact-interactions, .interactions')?.textContent || '');
+          const metaLine = clean(card.querySelector('.meta-line')?.textContent || '');
+          const links = Array.from(card.querySelectorAll('a[href]'))
+            .map((el) => abs(el.getAttribute('href') || ''))
+            .filter(Boolean);
+
+          return {
+            author,
+            time,
+            user_line: userLine,
+            badge,
+            title,
+            preview,
+            tags,
+            interactions,
+            meta_line: metaLine,
+            links,
+          };
+        }).filter((item) => item.title || item.preview);
+      })()
+    `) as Array<{
+      author?: string;
+      time?: string;
+      user_line?: string;
+      badge?: string;
+      title?: string;
+      preview?: string;
+      tags?: string[];
+      interactions?: string;
+      meta_line?: string;
+      links?: string[];
+    }> | null;
+
+    normalized = (rows ?? []).slice(0, limit).map((row, index) => {
+      const userLine = cleanText(row.user_line ?? '')
+        .replace(/复制链接|跳转星球|投诉建议/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const [authorByLine, timeByLine] = userLine.split('·').map((part) => cleanText(part));
+      return {
+        rank: index + 1,
+        author: cleanText(row.author ?? authorByLine),
+        time: cleanText(row.time ?? timeByLine),
+        badge: cleanText(row.badge ?? ''),
+        title: cleanText(row.title ?? '').replace(/^(精华|热门)\s*/, ''),
+        preview: trimWithLimit(row.preview ?? '', maxLength),
+        tags: Array.from(new Set((row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean))).join(', '),
+        interactions: formatScysInteractions(undefined, undefined, undefined, row.interactions || row.meta_line),
+        link: pickPreferredScysLink(row.links ?? []),
+      };
+    }).filter((row) => row.title || row.preview);
+  }
 
   if (normalized.length === 0) {
     throw new EmptyResultError('scys/feed', 'No feed cards were detected on this page');
@@ -401,8 +595,8 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
         author: cleanText(user.name),
         time: formatScysRelativeTime(topic.gmtCreate),
         flags: flags.join(', '),
-        title: cleanText(topic.showTitle),
-        content: cleanText(topic.articleContent),
+        title: cleanText(stripScysRichText(topic.showTitle)),
+        content: cleanText(stripScysRichText(topic.articleContent)),
         ai_summary: parseAiSummaryText(topic.aiSummaryContent),
         tags: tags.join(', '),
         interactions: `点赞${likeCount} 评论${commentCount} 收藏${favoriteCount}`,
@@ -470,9 +664,9 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
         author: cleanText(row.author ?? ''),
         time: cleanText(row.time ?? ''),
         flags: (row.flags ?? []).map((f) => cleanText(f)).filter(Boolean).join(', '),
-        title: cleanText(row.title ?? ''),
-        content: cleanText(row.content ?? ''),
-        ai_summary: cleanText(row.ai_summary ?? ''),
+        title: cleanText(stripScysRichText(row.title ?? '')),
+        content: cleanText(stripScysRichText(row.content ?? '')),
+        ai_summary: cleanText(stripScysRichText(row.ai_summary ?? '')),
         tags: tags.join(', '),
         interactions: extractInteractions(row.interactions ?? ''),
         link: cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId),
@@ -498,29 +692,67 @@ export async function extractScysActivity(page: IPage, inputUrl: string, opts: E
   await ensureScysLogin(page);
 
   const payload = await page.evaluate(`
-    (() => {
+    (async () => {
       const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+      const normalizeTab = (value) => clean(value).replace(/\s*New$/i, '').trim();
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+      const contentTabs = Array.from(document.querySelectorAll('.activity-left .container.v-no-scrollbar span, .container.v-no-scrollbar span'))
+        .filter((el) => clean(el.textContent || ''));
+      const roadmapTab = contentTabs.find((el) => clean(el.textContent || '').includes('航线图'));
+      if (roadmapTab && typeof roadmapTab.click === 'function') {
+        roadmapTab.click();
+        await sleep(500);
+      }
 
       const title = clean(
-        document.querySelector('h1, .activity-title, .landing-title')?.textContent ||
+        document.querySelector('.activity-left .name, h1, .activity-title, .landing-title')?.textContent ||
         document.title ||
         ''
       );
       const subtitle = clean(
-        document.querySelector('.subtitle, .sub-title, .activity-subtitle, .landing-subtitle')?.textContent ||
+        document.querySelector('.activity-left .des, .subtitle, .sub-title, .activity-subtitle, .landing-subtitle')?.textContent ||
         ''
       );
 
-      const tabs = Array.from(document.querySelectorAll('.tabs .tab, .tabs [role="tab"], .tab-item'))
-        .map((el) => clean(el.textContent || ''))
-        .filter(Boolean);
+      const tabGroups = Array.from(
+        document.querySelectorAll('.activity-left .tabs, .activity-left .container.v-no-scrollbar, .tabs')
+      )
+        .map((group) =>
+          Array.from(group.querySelectorAll('.tab-item, .tab, [role="tab"], .item, span'))
+            .map((el) => normalizeTab(el.textContent || ''))
+            .filter(Boolean)
+        )
+        .filter((group) => group.length > 0);
+      const tabsRaw =
+        tabGroups.find((group) => group.some((text) => /简介|航线图|问答/.test(text))) ||
+        tabGroups[0] ||
+        [];
+      const tabs = Array.from(new Set(tabsRaw));
 
-      const stageEls = Array.from(document.querySelectorAll('.week-card, .activity-line-content .stage, .activity-left .stage-card, .activity-left .week-card'));
+      const stageEls = Array.from(
+        document.querySelectorAll('.activity-line-content .week-card, .activity-left .week-card, .week-card')
+      );
       const stages = stageEls.map((stage) => {
-        const stageTitle = clean(stage.querySelector('h2, h3, .title, .stage-title, .week-title')?.textContent || '');
-        const duration = clean(stage.querySelector('.duration, .time, .date-range, .stage-duration')?.textContent || '');
-        const tasks = Array.from(stage.querySelectorAll('li, .task-item, .todo-item'))
-          .map((el) => clean(el.textContent || ''))
+        const phaseTitle = clean(stage.querySelector('.title-name, .stage-name')?.textContent || '');
+        const stageTitleRaw = clean(stage.querySelector('.title-week .text, .title-week, .week-title, .stage-title')?.textContent || '');
+        const duration = clean(
+          stage.querySelector('.title-week .highlightInActivity, .duration, .time, .date-range, .stage-duration')?.textContent || ''
+        );
+        const stageTitle = clean(
+          [phaseTitle, stageTitleRaw.replace(duration, '').trim()]
+            .map((v) => clean(v))
+            .filter(Boolean)
+            .join(' ')
+        );
+        const tasks = Array.from(stage.querySelectorAll('.card .row, .row'))
+          .map((row) => {
+            const key = clean(row.querySelector('.key')?.textContent || '');
+            const text = clean(row.querySelector('.card-title')?.textContent || row.textContent || '');
+            if (!text) return '';
+            if (key && !text.startsWith(key)) return key + '. ' + text;
+            return text;
+          })
           .filter(Boolean);
         return { title: stageTitle, duration, tasks };
       }).filter((stage) => stage.title || stage.tasks.length > 0);

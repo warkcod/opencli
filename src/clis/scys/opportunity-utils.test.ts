@@ -5,6 +5,7 @@ import {
   inferTopicIdFromImageUrls,
   normalizeOpportunityTab,
   parseAiSummaryText,
+  stripScysRichText,
   splitOpportunityFlagsAndTags,
 } from './opportunity-utils.js';
 
@@ -59,6 +60,16 @@ describe('parseAiSummaryText', () => {
     expect(parseAiSummaryText('<signal-summary><p><b>细分需求：</b>测试</p></signal-summary>')).toBe(
       '细分需求： 测试'
     );
+  });
+});
+
+describe('stripScysRichText', () => {
+  it('converts SCYS hashtag marker and strips tags', () => {
+    expect(
+      stripScysRichText(
+        '蹭热度：<e type="hashtag" title="%23%E5%85%A8%E5%9B%BD%E8%AE%A1%E7%AE%97%E6%9C%BA%E8%80%83%E8%AF%95%23" /> <p>备考</p>'
+      )
+    ).toBe('蹭热度： #全国计算机考试# 备考');
   });
 });
 

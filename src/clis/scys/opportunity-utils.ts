@@ -42,10 +42,36 @@ export function inferTopicIdFromImageUrls(urls: unknown): string {
 }
 
 export function parseAiSummaryText(input: unknown): string {
-  const html = String(input ?? '');
-  if (!html) return '';
-  return html
+  return stripScysRichText(input);
+}
+
+function decodeUriSafe(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * SCYS 富文本常见格式:
+ * - <e type="hashtag" title="%23xxxx%23" />
+ * - 常规 HTML 标签 <p>/<strong>/...
+ */
+export function stripScysRichText(input: unknown): string {
+  const raw = String(input ?? '');
+  if (!raw) return '';
+
+  const withHashtagText = raw.replace(
+    /<e\b[^>]*\btitle="([^"]+)"[^>]*\/?>/gi,
+    (_full, title: string) => ` ${decodeUriSafe(title)} `
+  );
+
+  return withHashtagText
+    .replace(/<e\b[^>]*\/?>/gi, ' ')
     .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
     .replace(/\s+/g, ' ')
     .trim();
 }
