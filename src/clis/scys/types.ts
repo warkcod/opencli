@@ -43,6 +43,11 @@ export interface ScysOpportunityRow {
   tags: string;
   interactions: string;
   link: string;
+  topic_id?: string;
+  entity_type?: string;
+  image_urls?: string[];
+  image_count?: number;
+  image_dir?: string;
 }
 
 export interface ScysActivityStage {

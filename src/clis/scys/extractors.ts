@@ -14,11 +14,20 @@ import type {
   ScysOpportunityRow,
   ScysTocRow,
 } from './types.js';
+import {
+  buildScysTopicLink,
+  formatScysRelativeTime,
+  inferTopicIdFromImageUrls,
+  normalizeOpportunityTab,
+  parseAiSummaryText,
+  splitOpportunityFlagsAndTags,
+} from './opportunity-utils.js';
 
 interface ExtractOptions {
   waitSeconds?: number;
   limit?: number;
   maxLength?: number;
+  tab?: string;
 }
 
 const SCYS_DOMAIN = 'scys.com';
@@ -321,77 +330,158 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
   const url = normalizeScysUrl(inputUrl);
   const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 3));
   const limit = Math.max(1, Number(opts.limit ?? 20));
+  const tab = normalizeOpportunityTab(opts.tab);
 
   await gotoAndWait(page, url, waitSeconds);
-  await page.autoScroll({ times: 2, delayMs: 1200 });
   await ensureScysLogin(page);
 
-  const rows = await page.evaluate(`
-    (() => {
-      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-      const abs = (href) => {
-        if (!href) return '';
-        if (href.startsWith('http://') || href.startsWith('https://')) return href;
-        if (href.startsWith('/')) return location.origin + href;
-        return '';
-      };
+  // API-first extraction. The page internally requests:
+  //   /shengcai-web/client/homePage/searchTopic
+  // We intercept this payload to get stable fields (time, tags, images, topic ids).
+  await page.installInterceptor('shengcai-web/client/homePage/searchTopic');
+  await page.evaluate(`
+    (async () => {
+      const clean = (v) => (v || '').replace(/\\s+/g, ' ').trim();
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const target = ${JSON.stringify(tab.label)};
+      const filters = Array.from(document.querySelectorAll('.vc-secondary-filter .filter-item'));
+      const hit = filters.find((el) => clean(el.textContent || '') === target);
+      const active = filters.find((el) => (el.className || '').includes('active'));
+      const alt = filters.find((el) => el !== hit);
 
-      const cards = Array.from(document.querySelectorAll('.post-list-container .post-item, .post-item'));
-      return cards.map((card) => {
-        const top = card.querySelector('.post-item-top') || card;
-        const author = clean(top.querySelector('.author, .name, .nickname, .user-name')?.textContent || top.querySelector('.user-line')?.textContent || '');
-        const time = clean(top.querySelector('.time, .meta-time, .meta-line')?.textContent || '');
+      // Trigger request even when the current tab is already active:
+      // switch away once, then switch back to target.
+      if (active && hit && active === hit && alt) {
+        alt.click();
+        await sleep(1000);
+      }
 
-        const flags = Array.from(card.querySelectorAll('.post-item-top .badge, .post-item-top .flag, .post-title .flag, .post-title .tag'))
-          .map((el) => clean(el.textContent || ''))
-          .filter(Boolean);
+      if (hit) {
+        hit.click();
+      } else if (filters.length > 0) {
+        filters[0].click();
+      }
 
-        const title = clean(card.querySelector('.post-title, .title-text, .title-line')?.textContent || '');
-        const content = clean(card.querySelector('.content-stream, .post-content, .content-preview')?.textContent || '');
-        const aiSummary = clean(card.querySelector('.ai-summary-container, .ai-summary')?.textContent || '');
-        const tags = Array.from(card.querySelectorAll('.label-box .label, .label-box span, .tags .tag'))
-          .map((el) => clean(el.textContent || ''))
-          .filter(Boolean);
-        const interactions = clean(card.querySelector('.interactions, .compact-interactions')?.textContent || '');
-        const link = abs(card.querySelector('a[href]')?.getAttribute('href') || '');
-
-        return {
-          author,
-          time,
-          flags,
-          title,
-          content,
-          ai_summary: aiSummary,
-          tags,
-          interactions,
-          link,
-        };
-      }).filter((item) => item.title || item.content);
+      await sleep(1400);
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(800);
     })()
-  `) as Array<{
-    author?: string;
-    time?: string;
-    flags?: string[];
-    title?: string;
-    content?: string;
-    ai_summary?: string;
-    tags?: string[];
-    interactions?: string;
-    link?: string;
-  }> | null;
+  `);
 
-  const normalized = (rows ?? []).slice(0, limit).map((row, index) => ({
-    rank: index + 1,
-    author: cleanText(row.author ?? ''),
-    time: cleanText(row.time ?? ''),
-    flags: (row.flags ?? []).map((f) => cleanText(f)).filter(Boolean).join(', '),
-    title: cleanText(row.title ?? ''),
-    content: cleanText(row.content ?? ''),
-    ai_summary: cleanText(row.ai_summary ?? ''),
-    tags: (row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean).join(', '),
-    interactions: extractInteractions(row.interactions ?? ''),
-    link: cleanText(row.link ?? ''),
-  }));
+  const intercepted = await page.getInterceptedRequests();
+  const latest = intercepted
+    .filter((entry) => {
+      const data = (entry as any)?.data;
+      return data && Array.isArray(data.items) && data.items.length > 0;
+    })
+    .at(-1) as any;
+
+  let normalized: ScysOpportunityRow[] = [];
+  if (latest?.data?.items?.length) {
+    normalized = latest.data.items.slice(0, limit).map((item: any, index: number) => {
+      const topic = item?.topicDTO ?? {};
+      const user = item?.topicUserDTO ?? {};
+      const menuValues = Array.isArray(topic.menuList)
+        ? topic.menuList.map((m: any) => cleanText(m?.value)).filter(Boolean)
+        : [];
+      const { flags, tags } = splitOpportunityFlagsAndTags(menuValues);
+
+      const likeCount = Number(topic.likeCount ?? 0) || 0;
+      const commentCount = Number(topic.commentsCount ?? 0) || 0;
+      const favoriteCount = Number(topic.favoriteCount ?? 0) || 0;
+
+      const entityType = cleanText(topic.entityType);
+      const topicId = cleanText(topic.topicId || topic.entityId);
+      const imageUrls = Array.isArray(topic.imageList)
+        ? topic.imageList.map((u: unknown) => cleanText(u)).filter(Boolean)
+        : [];
+
+      return {
+        rank: index + 1,
+        author: cleanText(user.name),
+        time: formatScysRelativeTime(topic.gmtCreate),
+        flags: flags.join(', '),
+        title: cleanText(topic.showTitle),
+        content: cleanText(topic.articleContent),
+        ai_summary: parseAiSummaryText(topic.aiSummaryContent),
+        tags: tags.join(', '),
+        interactions: `点赞${likeCount} 评论${commentCount} 收藏${favoriteCount}`,
+        link: cleanText(item.detailUrl) || buildScysTopicLink(entityType, topicId),
+        topic_id: topicId,
+        entity_type: entityType,
+        image_urls: imageUrls,
+      };
+    });
+  }
+
+  // DOM fallback: keep the previous extractor as backup when the API payload is blocked.
+  if (normalized.length === 0) {
+    await page.autoScroll({ times: 2, delayMs: 1200 });
+    const rows = await page.evaluate(`
+      (() => {
+        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+        const abs = (href) => {
+          if (!href) return '';
+          if (href.startsWith('http://') || href.startsWith('https://')) return href;
+          if (href.startsWith('/')) return location.origin + href;
+          return '';
+        };
+        const cards = Array.from(document.querySelectorAll('.post-list-container .post-item, .post-item'));
+        return cards.map((card) => {
+          const top = card.querySelector('.post-item-top') || card;
+          const author = clean(top.querySelector('.name, .author, .nickname, .user-name')?.textContent || '');
+          const time = clean(top.querySelector('.date, .time, .meta-time')?.textContent || '');
+          const flags = Array.from(card.querySelectorAll('.hit-icon, .icon, .post-title .tag, .post-title .flag'))
+            .map((el) => clean(el.textContent || ''))
+            .filter(Boolean);
+          const title = clean(card.querySelector('.post-title, .title-line')?.textContent || '');
+          const content = clean(card.querySelector('.content-stream, .post-content, .content-preview')?.textContent || '');
+          const aiSummary = clean(card.querySelector('.ai-summary-container .content, .ai-summary-container, .ai-summary')?.textContent || '');
+          const tags = Array.from(card.querySelectorAll('.label-box .tag-item, .label-box span, .tags .tag'))
+            .map((el) => clean(el.textContent || ''))
+            .filter(Boolean);
+          const interactions = clean(card.querySelector('.interactions, .compact-interactions')?.textContent || '');
+          const images = Array.from(card.querySelectorAll('.image-list img, img.multi-img'))
+            .map((img) => clean(img.getAttribute('src') || img.getAttribute('data-src') || ''))
+            .filter(Boolean);
+          const link = abs(card.querySelector('a[href]')?.getAttribute('href') || '');
+          return { author, time, flags, title, content, ai_summary: aiSummary, tags, interactions, link, image_urls: images };
+        }).filter((item) => item.title || item.content);
+      })()
+    `) as Array<{
+      author?: string;
+      time?: string;
+      flags?: string[];
+      title?: string;
+      content?: string;
+      ai_summary?: string;
+      tags?: string[];
+      interactions?: string;
+      link?: string;
+      image_urls?: string[];
+    }> | null;
+
+    normalized = (rows ?? []).slice(0, limit).map((row, index) => {
+      const imageUrls = (row.image_urls ?? []).map((u) => cleanText(u)).filter(Boolean);
+      const topicId = inferTopicIdFromImageUrls(imageUrls);
+      const tags = Array.from(new Set((row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean)));
+      return {
+        rank: index + 1,
+        author: cleanText(row.author ?? ''),
+        time: cleanText(row.time ?? ''),
+        flags: (row.flags ?? []).map((f) => cleanText(f)).filter(Boolean).join(', '),
+        title: cleanText(row.title ?? ''),
+        content: cleanText(row.content ?? ''),
+        ai_summary: cleanText(row.ai_summary ?? ''),
+        tags: tags.join(', '),
+        interactions: extractInteractions(row.interactions ?? ''),
+        link: cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId),
+        topic_id: topicId,
+        entity_type: topicId ? 'xq_topic' : '',
+        image_urls: imageUrls,
+      };
+    });
+  }
 
   if (normalized.length === 0) {
     throw new EmptyResultError('scys/opportunity', 'No opportunity cards were detected on this page');
