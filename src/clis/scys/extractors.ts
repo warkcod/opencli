@@ -2,13 +2,16 @@ import { AuthRequiredError, EmptyResultError } from '../../errors.js';
 import type { IPage } from '../../types.js';
 import {
   cleanText,
+  extractScysArticleMeta,
   extractInteractions,
   extractScysCourseId,
   normalizeScysUrl,
+  toScysArticleUrl,
   toScysCourseUrl,
 } from './common.js';
 import type {
   ScysActivitySummary,
+  ScysArticleSummary,
   ScysCourseSummary,
   ScysFeedRow,
   ScysOpportunityRow,
@@ -94,6 +97,28 @@ function polishScysText(value: unknown): string {
     text = text.replace(pattern, replacement);
   }
   return text;
+}
+
+function extractFirstNumber(value: unknown): number {
+  const text = cleanText(value);
+  if (!text) return 0;
+  const match = text.match(/[0-9]+(?:\.[0-9]+)?(?:万|亿)?/);
+  if (!match?.[0]) return 0;
+  const raw = match[0];
+  const numeric = Number(raw.replace(/[万亿]/g, ''));
+  if (!Number.isFinite(numeric)) return 0;
+  if (raw.endsWith('万')) return Math.floor(numeric * 10_000);
+  if (raw.endsWith('亿')) return Math.floor(numeric * 100_000_000);
+  return Math.floor(numeric);
+}
+
+function isLikelyExternalLink(url: string): boolean {
+  if (!url) return false;
+  return /^https?:\/\//i.test(url) && !/^https?:\/\/(?:www\.)?scys\.com\//i.test(url);
+}
+
+function normalizeMaybeBrokenUrl(raw: unknown): string {
+  return cleanText(raw).replace(/\s+/g, '');
 }
 
 export async function ensureScysFeedReady(page: IPage): Promise<void> {
@@ -365,6 +390,221 @@ export async function extractScysToc(page: IPage, courseInput: string, opts: Ext
   }
 
   return normalized;
+}
+
+export async function extractScysArticle(page: IPage, inputUrl: string, opts: ExtractOptions = {}): Promise<ScysArticleSummary> {
+  const url = toScysArticleUrl(inputUrl);
+  const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 5));
+  const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
+  const fromUrl = extractScysArticleMeta(url);
+
+  await gotoAndWait(page, url, waitSeconds);
+  await ensureScysLogin(page);
+
+  const payload = await page.evaluate(`
+    (() => {
+      const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const normalizeUrl = (value) => clean(value).replace(/\\s+/g, '');
+      const abs = (href) => {
+        const raw = normalizeUrl(href);
+        if (!raw) return '';
+        if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+        if (raw.startsWith('/')) return location.origin + raw;
+        return '';
+      };
+      const uniq = (list) => Array.from(new Set(list.filter(Boolean)));
+      const pickText = (selectors) => {
+        for (const selector of selectors) {
+          const text = clean(document.querySelector(selector)?.textContent || '');
+          if (text) return text;
+        }
+        return '';
+      };
+
+      const articleMatch = location.pathname.match(/^\\/articleDetail\\/([^/]+)\\/([^/]+)/);
+      const entityType = clean(articleMatch?.[1] || '');
+      const topicId = clean(articleMatch?.[2] || '');
+
+      const title = pickText([
+        '.title-line .post-title',
+        '.post-title',
+        '.article-title',
+        '.topic-title',
+        'h1',
+      ]) || clean(document.title || '');
+      const author = pickText([
+        '.post-item-top-right .name',
+        '.post-item-top .name',
+        '.post-item-top-right .user-name',
+        '.post-item-top .user-name',
+      ]);
+      const time = pickText([
+        '.post-item-top-right .date',
+        '.post-item-top .date',
+        '.post-item-top-right .time',
+        '.post-item-top .time',
+      ]);
+
+      const content = pickText([
+        '.post-content',
+        '.content-container .post-content',
+        '.content-container',
+      ]);
+      const aiSummary = pickText([
+        '.ai-summary-container .content',
+        '.ai-summary-container .content-stream',
+        '.ai-summary-container',
+      ]);
+
+      const flags = uniq(
+        Array.from(document.querySelectorAll('.title-line .icon, .title-line .tag, .title-line .flag'))
+          .map((el) => clean(el.textContent || ''))
+      );
+      const tags = uniq(
+        Array.from(document.querySelectorAll('.label-box .tag-item, .tag-label-box .tag-item, .label-box .tag'))
+          .map((el) => clean(el.textContent || ''))
+      );
+
+      const interactionNodes = Array.from(
+        document.querySelectorAll('.interactions .item, .interactions .favorite-wrapper, .interactions .favorite-wrapper .item')
+      ).map((el) => ({
+        cls: (el.className || '').toString(),
+        text: clean(el.textContent || ''),
+      }));
+
+      const likeText = clean(document.querySelector('.interactions .like-item')?.textContent || '');
+      const favoriteText = clean(
+        document.querySelector('.interactions .favorite-wrapper .item')?.textContent ||
+        document.querySelector('.interactions .favorite-wrapper')?.textContent ||
+        ''
+      );
+      const commentText = clean(
+        interactionNodes.find((node) => /item/.test(node.cls) && !/like/.test(node.cls) && /^[0-9]/.test(node.text))?.text || ''
+      );
+
+      const imageCandidates = Array.from(
+        document.querySelectorAll('.image-list-container img, .arco-carousel img, .post-content img, .content-container img')
+      )
+        .map((img) => abs(img.getAttribute('src') || img.getAttribute('data-src') || ''))
+        .map((src) => normalizeUrl(src))
+        .filter(Boolean)
+        .filter((src) => !src.startsWith('data:'))
+        .filter((src) => !src.includes('/upload/avatar/'))
+        .filter((src) => !src.includes('/images/img_bg_empty'))
+        .filter((src) => /\\/xq\\/images\\/|\\.(jpg|jpeg|png|webp|gif)(\\?|$)/i.test(src));
+      const images = uniq(imageCandidates);
+
+      const sourceLinks = uniq(
+        Array.from(document.querySelectorAll('.post-content a[href], .content-container a[href]'))
+          .map((a) => abs(a.getAttribute('href') || ''))
+          .map((href) => normalizeUrl(href))
+      );
+      const externalLinks = sourceLinks.filter((href) => /^https?:\\/\\//i.test(href) && !/^https?:\\/\\/(?:www\\.)?scys\\.com\\//i.test(href));
+
+      return {
+        entityType,
+        topicId,
+        title,
+        author,
+        time,
+        flags,
+        tags,
+        content,
+        aiSummary,
+        likeText,
+        commentText,
+        favoriteText,
+        images,
+        sourceLinks,
+        externalLinks,
+        pageUrl: location.href,
+      };
+    })()
+  `) as {
+    entityType?: string;
+    topicId?: string;
+    title?: string;
+    author?: string;
+    time?: string;
+    flags?: string[];
+    tags?: string[];
+    content?: string;
+    aiSummary?: string;
+    likeText?: string;
+    commentText?: string;
+    favoriteText?: string;
+    images?: string[];
+    sourceLinks?: string[];
+    externalLinks?: string[];
+    pageUrl?: string;
+  } | null;
+
+  if (!payload) {
+    throw new EmptyResultError('scys/article', 'Failed to extract article detail page');
+  }
+
+  const rawFlags = (payload.flags ?? []).map((value) => polishScysText(value)).filter(Boolean);
+  const rawTags = (payload.tags ?? []).map((value) => polishScysText(value)).filter(Boolean);
+  const split = splitOpportunityFlagsAndTags([...rawFlags, ...rawTags]);
+  const flags = Array.from(
+    new Set([
+      ...rawFlags,
+      ...split.flags.map((value) => polishScysText(value)).filter(Boolean),
+    ])
+  );
+  const tags = Array.from(
+    new Set([
+      ...rawTags,
+      ...split.tags.map((value) => polishScysText(value)).filter(Boolean),
+    ])
+  ).filter((tag) => !flags.includes(tag));
+
+  const likes = extractFirstNumber(payload.likeText);
+  const comments = extractFirstNumber(payload.commentText);
+  const favorites = extractFirstNumber(payload.favoriteText);
+  const display = `点赞${likes} 评论${comments} 收藏${favorites}`;
+
+  const sourceLinks = Array.from(
+    new Set((payload.sourceLinks ?? []).map((href) => normalizeMaybeBrokenUrl(href)).filter(Boolean))
+  );
+  const externalLinks = Array.from(
+    new Set((payload.externalLinks ?? []).map((href) => normalizeMaybeBrokenUrl(href)).filter(isLikelyExternalLink))
+  );
+  const images = Array.from(
+    new Set((payload.images ?? []).map((src) => normalizeMaybeBrokenUrl(src)).filter(Boolean))
+  );
+
+  const content = polishScysText(stripScysRichText(payload.content ?? '')).slice(0, maxLength);
+  const aiSummary = polishScysText(stripScysRichText(payload.aiSummary ?? '')).slice(0, maxLength);
+  const title = polishScysText(payload.title ?? '');
+  const author = polishScysText(payload.author ?? '');
+
+  if (!title && !content && !aiSummary) {
+    throw new EmptyResultError('scys/article', 'No title/content was detected on this article page');
+  }
+
+  return {
+    entity_type: polishScysText(payload.entityType || fromUrl.entityType),
+    topic_id: polishScysText(payload.topicId || fromUrl.topicId),
+    url: normalizeScysUrl(payload.pageUrl || url),
+    title,
+    author,
+    time: polishScysText(payload.time ?? ''),
+    tags,
+    flags,
+    content,
+    ai_summary: aiSummary,
+    interactions: {
+      likes,
+      comments,
+      favorites,
+      display,
+    },
+    images,
+    external_links: externalLinks,
+    source_links: sourceLinks,
+    raw_link: normalizeScysUrl(payload.pageUrl || url),
+  };
 }
 
 export async function extractScysFeed(page: IPage, inputUrl: string, opts: ExtractOptions = {}): Promise<ScysFeedRow[]> {

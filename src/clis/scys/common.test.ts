@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   cleanText,
   detectScysPageType,
+  extractScysArticleMeta,
   extractInteractions,
   normalizeScysUrl,
+  toScysArticleUrl,
   toScysCourseUrl,
 } from './common.js';
 
@@ -28,6 +30,29 @@ describe('toScysCourseUrl', () => {
     expect(toScysCourseUrl('https://scys.com/course/detail/142?chapterId=9445')).toBe(
       'https://scys.com/course/detail/142?chapterId=9445'
     );
+  });
+});
+
+describe('toScysArticleUrl', () => {
+  it('accepts numeric topic id', () => {
+    expect(toScysArticleUrl('55188458224514554')).toBe(
+      'https://scys.com/articleDetail/xq_topic/55188458224514554'
+    );
+  });
+
+  it('keeps full article detail url', () => {
+    expect(toScysArticleUrl('https://scys.com/articleDetail/xq_topic/55188458224514554')).toBe(
+      'https://scys.com/articleDetail/xq_topic/55188458224514554'
+    );
+  });
+});
+
+describe('extractScysArticleMeta', () => {
+  it('extracts entity type and topic id from url', () => {
+    expect(extractScysArticleMeta('https://scys.com/articleDetail/xq_topic/55188458224514554')).toEqual({
+      entityType: 'xq_topic',
+      topicId: '55188458224514554',
+    });
   });
 });
 

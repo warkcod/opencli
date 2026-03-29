@@ -63,3 +63,28 @@ export interface ScysActivitySummary {
   stages: ScysActivityStage[];
   url: string;
 }
+
+export interface ScysArticleInteractions {
+  likes: number;
+  comments: number;
+  favorites: number;
+  display: string;
+}
+
+export interface ScysArticleSummary {
+  entity_type: string;
+  topic_id: string;
+  url: string;
+  title: string;
+  author: string;
+  time: string;
+  tags: string[];
+  flags: string[];
+  content: string;
+  ai_summary: string;
+  interactions: ScysArticleInteractions;
+  images: string[];
+  external_links: string[];
+  source_links: string[];
+  raw_link: string;
+}

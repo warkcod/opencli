@@ -35,6 +35,26 @@ export function toScysCourseUrl(input: string): string {
   return normalizeScysUrl(raw);
 }
 
+export function toScysArticleUrl(input: string): string {
+  const raw = String(input ?? '').trim();
+  if (!raw) throw new ArgumentError('Article URL is required');
+
+  if (/^\d{8,}$/.test(raw)) {
+    return `${SCYS_ORIGIN}/articleDetail/xq_topic/${raw}`;
+  }
+
+  const url = normalizeScysUrl(raw);
+  const parsed = new URL(url);
+  const match = parsed.pathname.match(/^\/articleDetail\/([^/]+)\/([^/]+)$/);
+  if (!match) {
+    throw new ArgumentError(
+      `Unsupported SCYS article URL: ${input}`,
+      'Use /articleDetail/<entityType>/<topicId> or pass a numeric topic id'
+    );
+  }
+  return url;
+}
+
 export function detectScysPageType(input: string): ScysPageType {
   const url = new URL(normalizeScysUrl(input));
   const pathname = url.pathname;
@@ -60,6 +80,15 @@ export function extractScysCourseId(input: string): string {
   const url = new URL(toScysCourseUrl(input));
   const match = url.pathname.match(/\/course\/detail\/(\d+)/);
   return match?.[1] ?? '';
+}
+
+export function extractScysArticleMeta(input: string): { entityType: string; topicId: string } {
+  const url = new URL(toScysArticleUrl(input));
+  const match = url.pathname.match(/^\/articleDetail\/([^/]+)\/([^/]+)$/);
+  return {
+    entityType: match?.[1] ?? '',
+    topicId: match?.[2] ?? '',
+  };
 }
 
 export function cleanText(value: unknown): string {
