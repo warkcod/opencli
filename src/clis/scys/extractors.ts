@@ -26,6 +26,11 @@ import {
   stripScysRichText,
   splitOpportunityFlagsAndTags,
 } from './opportunity-utils.js';
+import {
+  buildScysCourseChapterUrls,
+  normalizeScysCoursePayload,
+  repairScysBrokenUrls,
+} from './course-utils.js';
 
 interface ExtractOptions {
   waitSeconds?: number;
@@ -164,6 +169,422 @@ function isLikelyFalsePositiveLink(url: string): boolean {
   return /^https?:\/\/\d+\.[a-z]{2,}\/?$/i.test(normalized);
 }
 
+interface RawScysTocRow {
+  entry_type?: string;
+  section?: string;
+  group?: string;
+  chapter_id?: string;
+  chapter_title?: string;
+  status?: string;
+  is_current?: boolean;
+}
+
+function normalizeScysTocRows(rows: RawScysTocRow[] | null | undefined): ScysTocRow[] {
+  const seen = new Set<string>();
+  const out: ScysTocRow[] = [];
+
+  for (const row of rows ?? []) {
+    const entryType = cleanText(row.entry_type || 'chapter');
+    const section = cleanText(row.section ?? '');
+    const group = cleanText(row.group ?? '');
+    const chapterId = cleanText(row.chapter_id ?? '');
+    const chapterTitle = cleanText(row.chapter_title ?? '');
+    const status = cleanText(row.status ?? '');
+    const isCurrent = !!row.is_current;
+
+    if (!section && !group && !chapterTitle && !chapterId) continue;
+
+    const key = [
+      entryType || 'chapter',
+      section,
+      group,
+      chapterId,
+      chapterTitle,
+      status,
+      isCurrent ? '1' : '0',
+    ].join('|');
+
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      rank: out.length + 1,
+      entry_type: entryType === 'section' ? 'section' : 'chapter',
+      section,
+      group,
+      chapter_id: chapterId,
+      chapter_title: chapterTitle,
+      status,
+      is_current: isCurrent,
+    });
+  }
+
+  return out;
+}
+
+async function evaluateScysTocRows(page: IPage): Promise<ScysTocRow[]> {
+  const rows = await page.evaluate(`
+    (() => {
+      const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const out = [];
+      const seen = new Set();
+      const pushRow = (row) => {
+        const normalized = {
+          entry_type: clean(row.entry_type || 'chapter'),
+          section: clean(row.section || ''),
+          group: clean(row.group || ''),
+          chapter_id: clean(row.chapter_id || ''),
+          chapter_title: clean(row.chapter_title || ''),
+          status: clean(row.status || ''),
+          is_current: !!row.is_current,
+        };
+        if (!normalized.section && !normalized.group && !normalized.chapter_id && !normalized.chapter_title) return;
+        const key = [
+          normalized.entry_type || 'chapter',
+          normalized.section,
+          normalized.group,
+          normalized.chapter_id,
+          normalized.chapter_title,
+          normalized.status,
+          normalized.is_current ? '1' : '0',
+        ].join('|');
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(normalized);
+      };
+
+      const chapterSelector = '.vc-chapter-item[data-item-id], .chapter-list .vc-chapter-item, .vc-chapter-item';
+      const groups = Array.from(document.querySelectorAll('.vc-chapter-group'));
+      const sections = Array.from(document.querySelectorAll('.catalogue-section'));
+
+      if (sections.length > 0) {
+        sections.forEach((section) => {
+          const sectionTitle = clean(
+            section.querySelector('.section-title, .catalogue-section-title, .title')?.textContent || ''
+          );
+          if (sectionTitle) {
+            pushRow({
+              entry_type: 'section',
+              section: sectionTitle,
+              group: sectionTitle,
+              chapter_title: sectionTitle,
+              chapter_id: '',
+              status: '',
+              is_current: false,
+            });
+          }
+
+          const sectionGroups = Array.from(section.querySelectorAll('.vc-chapter-group'));
+          if (sectionGroups.length > 0) {
+            sectionGroups.forEach((group) => {
+              const groupTitle = clean(
+                group.querySelector('.group-title, .chapter-group-title, .vc-group-title')?.textContent || ''
+              );
+              const items = Array.from(group.querySelectorAll(chapterSelector));
+              items.forEach((item) => {
+                const title = clean(
+                  item.querySelector('.chapter-title')?.textContent ||
+                  item.querySelector('.chapter-content')?.textContent ||
+                  item.textContent ||
+                  ''
+                );
+                const status = clean(item.querySelector('.chapter-status, .chapter-meta')?.textContent || '');
+                const cls = item.className || '';
+                const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
+                if (!title) return;
+                pushRow({
+                  entry_type: 'chapter',
+                  section: sectionTitle,
+                  group: groupTitle || sectionTitle,
+                  chapter_id: item.getAttribute('data-item-id') || '',
+                  chapter_title: title,
+                  status,
+                  is_current: isCurrent,
+                });
+              });
+            });
+          }
+        });
+      }
+
+      if (out.length === 0 && groups.length > 0) {
+        groups.forEach((group) => {
+          const groupTitle = clean(
+            group.querySelector('.group-title, .chapter-group-title, .vc-group-title')?.textContent || ''
+          );
+          const sectionTitle = clean(
+            group.closest('.catalogue-section')?.querySelector('.section-title, .catalogue-section-title, .title')?.textContent || ''
+          );
+          const items = Array.from(group.querySelectorAll(chapterSelector));
+          items.forEach((item) => {
+            const title = clean(
+              item.querySelector('.chapter-title')?.textContent ||
+              item.querySelector('.chapter-content')?.textContent ||
+              item.textContent ||
+              ''
+            );
+            const status = clean(item.querySelector('.chapter-status, .chapter-meta')?.textContent || '');
+            const cls = item.className || '';
+            const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
+            if (!title) return;
+            pushRow({
+              entry_type: 'chapter',
+              section: sectionTitle,
+              group: groupTitle,
+              chapter_id: item.getAttribute('data-item-id') || '',
+              chapter_title: title,
+              status,
+              is_current: isCurrent,
+            });
+          });
+        });
+      }
+
+      if (out.length === 0) {
+        const items = Array.from(document.querySelectorAll(chapterSelector));
+        items.forEach((item) => {
+          const title = clean(
+            item.querySelector('.chapter-title')?.textContent ||
+            item.querySelector('.chapter-content')?.textContent ||
+            item.textContent ||
+            ''
+          );
+          const status = clean(item.querySelector('.chapter-status, .chapter-meta')?.textContent || '');
+          const cls = item.className || '';
+          const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
+          if (!title) return;
+          pushRow({
+            entry_type: 'chapter',
+            section: '',
+            group: '',
+            chapter_id: item.getAttribute('data-item-id') || '',
+            chapter_title: title,
+            status,
+            is_current: isCurrent,
+          });
+        });
+      }
+
+      return out;
+    })()
+  `) as RawScysTocRow[] | null;
+
+  return normalizeScysTocRows(rows);
+}
+
+function polishScysCourseSummary(
+  summary: Omit<ScysCourseSummary, 'course_id'> & { course_id?: string },
+  courseId: string,
+  maxLength: number,
+): ScysCourseSummary {
+  return {
+    ...summary,
+    course_id: courseId,
+    course_title: polishScysText(summary.course_title),
+    chapter_title: polishScysText(summary.chapter_title),
+    breadcrumb: polishScysText(summary.breadcrumb),
+    content: polishScysText(repairScysBrokenUrls(summary.content)).slice(0, maxLength),
+    toc_summary: polishScysText(summary.toc_summary),
+    updated_at_text: polishScysText(summary.updated_at_text),
+    copyright_text: polishScysText(summary.copyright_text),
+    prev_chapter: polishScysText(summary.prev_chapter),
+    next_chapter: polishScysText(summary.next_chapter),
+    discussion_hint: polishScysText(summary.discussion_hint),
+    url: summary.url || '',
+    raw_url: summary.raw_url || '',
+    links: Array.from(new Set((summary.links ?? []).map((link) => cleanText(link)).filter(Boolean))),
+    images: Array.from(new Set((summary.images ?? []).map((link) => cleanText(link)).filter(Boolean))),
+    content_images: Array.from(new Set((summary.content_images ?? []).map((link) => cleanText(link)).filter(Boolean))),
+    image_count: Array.isArray(summary.images) ? summary.images.length : 0,
+    content_image_count: Array.isArray(summary.content_images) ? summary.content_images.length : 0,
+    image_dir: summary.image_dir || '',
+  };
+}
+
+async function extractScysCourseSingle(page: IPage, inputUrl: string, opts: ExtractOptions = {}): Promise<ScysCourseSummary> {
+  const url = toScysCourseUrl(inputUrl);
+  const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 3));
+  const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
+
+  await gotoAndWait(page, url, waitSeconds);
+  await ensureScysLogin(page);
+
+  const tocRows = await evaluateScysTocRows(page);
+
+  const payload = await page.evaluate(`
+    (() => {
+      const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const normalizeUrl = (value) => clean(value).replace(/\\s+/g, '');
+      const abs = (href) => {
+        const raw = normalizeUrl(href);
+        if (!raw) return '';
+        if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+        if (raw.startsWith('//')) return location.protocol + raw;
+        if (raw.startsWith('/')) return location.origin + raw;
+        return '';
+      };
+      const uniq = (list) => Array.from(new Set(list.filter(Boolean)));
+      const pickFirstText = (selectors) => {
+        for (const selector of selectors) {
+          const el = document.querySelector(selector);
+          const text = clean(el?.textContent || el?.innerText || '');
+          if (text) return text;
+        }
+        return '';
+      };
+      const pickFirstEl = (selectors) => {
+        for (const selector of selectors) {
+          const el = document.querySelector(selector);
+          if (el) return el;
+        }
+        return null;
+      };
+      const bodyText = clean(document.body?.innerText || '');
+      const capture = (matcher) => clean(bodyText.match(matcher)?.[0] || '');
+
+      const contentEl = pickFirstEl([
+        '.feishu-doc-content',
+        '.document-container',
+        '.vc-course-content',
+        '.course-content-container',
+        '.content-container',
+        '.vc-course-main',
+      ]);
+
+      const breadcrumbTexts = Array.from(
+        document.querySelectorAll(
+          '.simple-catalog-toggle .breadcrumb-item, .breadcrumb-item, .breadcrumb a, .breadcrumb span, .vc-breadcrumb a, .vc-breadcrumb span'
+        )
+      )
+        .map((el) => clean(el.textContent || ''))
+        .filter(Boolean);
+
+      const chapterItems = Array.from(document.querySelectorAll('.vc-chapter-item[data-item-id], .chapter-list .vc-chapter-item')).map((el) => {
+        const item = el;
+        const id = clean(item.getAttribute('data-item-id') || '');
+        const title = clean(
+          item.querySelector('.chapter-title')?.textContent ||
+          item.querySelector('.chapter-content')?.textContent ||
+          item.textContent ||
+          ''
+        );
+        const cls = item.className || '';
+        const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
+        return { id, title, isCurrent };
+      }).filter((row) => row.title);
+
+      const chapterIdFromQuery = new URL(location.href).searchParams.get('chapterId') || '';
+      const chapterId = chapterIdFromQuery || chapterItems.find((item) => item.isCurrent)?.id || '';
+      const activeChapterEl =
+        document.querySelector('.vc-chapter-item.is-active, .vc-chapter-item.is-current, .vc-chapter-item.active') ||
+        null;
+      const activeGroupTitle = clean(
+        activeChapterEl?.closest('.vc-chapter-group')?.querySelector('.group-title, .chapter-group-title')?.textContent || ''
+      );
+      const activeSectionTitle = clean(
+        activeChapterEl?.closest('.catalogue-section')?.querySelector('.section-title, .catalogue-section-title, .title')?.textContent || ''
+      );
+      const activeChapterTitle = clean(activeChapterEl?.querySelector('.chapter-title')?.textContent || '');
+      const catalogBreadcrumb = [activeSectionTitle, activeGroupTitle, activeChapterTitle].filter(Boolean);
+
+      const courseTitle =
+        pickFirstText([
+          '.vc-course-main .course-name',
+          '.course-name',
+          '.vc-course-sidebar .course-title',
+          '.course-header .course-title',
+          '.course-title',
+        ]) ||
+        clean((document.title || '').split(' - ')[0] || '');
+
+      const chapterTitleFromContent = pickFirstText([
+        '.vc-course-content .content-title',
+        '.course-content-container .content-title',
+        '.content-title',
+        '.current-chapter',
+        '.vc-course-main h1',
+        'h1',
+      ]);
+
+      const allImages = uniq(
+        Array.from(document.querySelectorAll('img'))
+          .map((img) => abs(img.currentSrc || img.getAttribute('src') || img.getAttribute('data-src') || ''))
+      );
+      const contentImages = uniq(
+        Array.from(contentEl?.querySelectorAll?.('img') || [])
+          .map((img) => abs(img.currentSrc || img.getAttribute('src') || img.getAttribute('data-src') || ''))
+      );
+      const links = uniq(
+        Array.from(contentEl?.querySelectorAll?.('a[href]') || [])
+          .map((link) => abs(link.getAttribute('href') || ''))
+      );
+
+      return {
+        courseTitle,
+        chapterTitle: chapterTitleFromContent,
+        currentChapter:
+          chapterItems.find((item) => item.id === chapterId)?.title ||
+          chapterItems.find((item) => item.isCurrent)?.title ||
+          activeChapterTitle ||
+          chapterTitleFromContent,
+        breadcrumb: catalogBreadcrumb.length >= 2 ? catalogBreadcrumb : breadcrumbTexts,
+        content: clean(contentEl?.innerText || ''),
+        chapterId,
+        pageUrl: location.href,
+        images: allImages,
+        contentImages,
+        links,
+        updatedAtText: capture(/更新于[:：]?\\s*[0-9]{4}[./-][0-9]{2}[./-][0-9]{2}\\s*[0-9]{2}:[0-9]{2}/),
+        copyrightText: capture(/版权归[^。！？]{0,120}(?:。|$)/),
+        prevChapter: bodyText.includes('上一节') ? '上一节' : '',
+        nextChapter: bodyText.includes('下一节') ? '下一节' : '',
+        participantText: capture(/\\d+\\s*人参与/),
+        discussionHint: bodyText.includes('发起讨论') ? '发起讨论' : (bodyText.includes('讨论区') ? '讨论区' : ''),
+      };
+    })()
+  `) as Record<string, unknown> | null;
+
+  if (!payload) {
+    throw new EmptyResultError('scys/course', 'Failed to extract course page content');
+  }
+
+  const courseId = extractScysCourseId(url);
+  const normalized = normalizeScysCoursePayload({
+    courseTitle: payload.courseTitle as string | undefined,
+    chapterTitle: payload.chapterTitle as string | undefined,
+    currentChapter: payload.currentChapter as string | undefined,
+    breadcrumb: Array.isArray(payload.breadcrumb) ? payload.breadcrumb as string[] : [],
+    content: payload.content as string | undefined,
+    chapterId: payload.chapterId as string | undefined,
+    pageUrl: String(payload.pageUrl || url),
+    images: Array.isArray(payload.images) ? payload.images : [],
+    contentImages: Array.isArray(payload.contentImages) ? payload.contentImages : [],
+    links: Array.isArray(payload.links) ? payload.links : [],
+    tocRows,
+    updatedAtText: payload.updatedAtText as string | undefined,
+    copyrightText: payload.copyrightText as string | undefined,
+    prevChapter: payload.prevChapter as string | undefined,
+    nextChapter: payload.nextChapter as string | undefined,
+    discussionHint: payload.discussionHint as string | undefined,
+    participantText: payload.participantText as string | undefined,
+  });
+
+  const result = polishScysCourseSummary(
+    {
+      ...normalized,
+      url: normalized.url || normalizeScysUrl(url),
+      raw_url: normalized.raw_url || normalizeScysUrl(url),
+    },
+    courseId,
+    maxLength,
+  );
+
+  if (!result.content && tocRows.length === 0) {
+    throw new EmptyResultError('scys/course', 'No course content or table of contents was detected');
+  }
+
+  return result;
+}
+
 export async function ensureScysFeedReady(page: IPage): Promise<void> {
   await page.evaluate(`
     (async () => {
@@ -214,152 +635,22 @@ export async function ensureScysLogin(page: IPage): Promise<void> {
 }
 
 export async function extractScysCourse(page: IPage, inputUrl: string, opts: ExtractOptions = {}): Promise<ScysCourseSummary> {
-  const url = toScysCourseUrl(inputUrl);
-  const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 3));
-  const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
+  return extractScysCourseSingle(page, inputUrl, opts);
+}
 
-  await gotoAndWait(page, url, waitSeconds);
-  await ensureScysLogin(page);
+export async function extractScysCourseAll(page: IPage, inputUrl: string, opts: ExtractOptions = {}): Promise<ScysCourseSummary[]> {
+  const tocRows = await extractScysToc(page, inputUrl, opts);
+  const urls = buildScysCourseChapterUrls(inputUrl, tocRows);
 
-  const payload = await page.evaluate(`
-    (() => {
-      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-      const pickFirstText = (selectors) => {
-        for (const selector of selectors) {
-          const el = document.querySelector(selector);
-          const text = clean(el?.textContent || el?.innerText || '');
-          if (text) return text;
-        }
-        return '';
-      };
-
-      const pickFirstEl = (selectors) => {
-        for (const selector of selectors) {
-          const el = document.querySelector(selector);
-          if (el) return el;
-        }
-        return null;
-      };
-
-      const contentEl = pickFirstEl([
-        '.feishu-doc-content',
-        '.document-container',
-        '.vc-course-content',
-        '.course-content-container',
-        '.content-container',
-        '.vc-course-main',
-      ]);
-
-      const chapterItems = Array.from(document.querySelectorAll('.vc-chapter-item[data-item-id], .chapter-list .vc-chapter-item')).map((el) => {
-        const item = el;
-        const id = clean(item.getAttribute('data-item-id') || '');
-        const title = clean(
-          item.querySelector('.chapter-title')?.textContent ||
-          item.querySelector('.chapter-content')?.textContent ||
-          item.textContent ||
-          ''
-        );
-        const status = clean(item.querySelector('.chapter-status')?.textContent || item.querySelector('.chapter-meta')?.textContent || '');
-        const cls = item.className || '';
-        const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
-        return { id, title, status, isCurrent };
-      }).filter((row) => row.title);
-
-      const activeChapterEl =
-        document.querySelector('.vc-chapter-item.is-active, .vc-chapter-item.is-current, .vc-chapter-item.active') ||
-        null;
-      const activeGroupTitle = clean(
-        activeChapterEl?.closest('.vc-chapter-group')?.querySelector('.group-title, .chapter-group-title')?.textContent || ''
-      );
-      const activeSectionTitle = clean(
-        activeChapterEl?.closest('.catalogue-section')?.querySelector('.section-title')?.textContent || ''
-      );
-      const activeChapterTitle = clean(activeChapterEl?.querySelector('.chapter-title')?.textContent || '');
-      const catalogBreadcrumb = [activeSectionTitle, activeGroupTitle, activeChapterTitle].filter(Boolean);
-
-      const breadcrumbTexts = Array.from(
-        document.querySelectorAll(
-          '.simple-catalog-toggle .breadcrumb-item, .breadcrumb-item, .breadcrumb a, .breadcrumb span, .vc-breadcrumb a, .vc-breadcrumb span'
-        )
-      )
-        .map((el) => clean(el.textContent || ''))
-        .filter(Boolean);
-
-      const courseTitle =
-        pickFirstText([
-          '.vc-course-main .course-name',
-          '.course-name',
-          '.vc-course-sidebar .course-title',
-          '.course-header .course-title',
-          '.course-title',
-        ]) ||
-        clean((document.title || '').split(' - ')[0] || '');
-
-      const chapterTitleFromContent = pickFirstText([
-        '.vc-course-content .content-title',
-        '.course-content-container .content-title',
-        '.content-title',
-        '.current-chapter',
-        '.vc-course-main h1',
-        'h1',
-      ]);
-
-      const currentChapter =
-        chapterItems.find((item) => item.isCurrent)?.title ||
-        pickFirstText(['.vc-chapter-item.is-active .chapter-title', '.vc-chapter-item.active .chapter-title']) ||
-        chapterTitleFromContent;
-
-      const chapterIdFromQuery = new URL(location.href).searchParams.get('chapterId') || '';
-      const chapterId = chapterIdFromQuery || chapterItems.find((item) => item.isCurrent)?.id || '';
-
-      return {
-        courseTitle,
-        chapterTitle: chapterTitleFromContent,
-        currentChapter,
-        breadcrumb: catalogBreadcrumb.length >= 2 ? catalogBreadcrumb : breadcrumbTexts,
-        content: clean(contentEl?.innerText || ''),
-        chapters: chapterItems,
-        chapterId,
-        pageUrl: location.href,
-      };
-    })()
-  `) as {
-    courseTitle?: string;
-    chapterTitle?: string;
-    currentChapter?: string;
-    breadcrumb?: string[];
-    content?: string;
-    chapters?: Array<{ id?: string; title?: string; status?: string; isCurrent?: boolean }>;
-    chapterId?: string;
-    pageUrl?: string;
-  } | null;
-
-  if (!payload) {
-    throw new EmptyResultError('scys/course', 'Failed to extract course page content');
+  if (urls.length === 0) {
+    throw new EmptyResultError('scys/course', 'No chapter ids were detected for deterministic full-course export');
   }
 
-  const courseId = extractScysCourseId(url);
-  const content = polishScysText(payload.content ?? '').slice(0, maxLength);
-  const chapters = Array.isArray(payload.chapters) ? payload.chapters : [];
-  const tocSummary = chapters
-    .slice(0, 8)
-    .map((item, index) => `${index + 1}.${polishScysText(item.title)}${item.id ? `(${item.id})` : ''}`)
-    .join(' | ');
-
-  if (!content && chapters.length === 0) {
-    throw new EmptyResultError('scys/course', 'No course content or table of contents was detected');
+  const out: ScysCourseSummary[] = [];
+  for (const url of urls) {
+    out.push(await extractScysCourseSingle(page, url, opts));
   }
-
-  return {
-    course_title: polishScysText(payload.courseTitle ?? ''),
-    chapter_title: polishScysText(payload.currentChapter ?? payload.chapterTitle ?? ''),
-    breadcrumb: (payload.breadcrumb ?? []).map((s) => polishScysText(s)).filter(Boolean).join(' > '),
-    content,
-    chapter_id: polishScysText(payload.chapterId ?? ''),
-    course_id: courseId,
-    toc_summary: tocSummary,
-    url: normalizeScysUrl(payload.pageUrl || url),
-  };
+  return out;
 }
 
 export async function extractScysToc(page: IPage, courseInput: string, opts: ExtractOptions = {}): Promise<ScysTocRow[]> {
@@ -369,64 +660,7 @@ export async function extractScysToc(page: IPage, courseInput: string, opts: Ext
   await gotoAndWait(page, url, waitSeconds);
   await ensureScysLogin(page);
 
-  const rows = await page.evaluate(`
-    (() => {
-      const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-      const out = [];
-
-      const groups = Array.from(document.querySelectorAll('.vc-chapter-group'));
-      if (groups.length > 0) {
-        groups.forEach((group) => {
-          const groupTitle = clean(
-            group.querySelector('.group-title, .chapter-group-title, .vc-group-title')?.textContent ||
-            ''
-          );
-          const items = Array.from(group.querySelectorAll('.vc-chapter-item[data-item-id], .vc-chapter-item'));
-          items.forEach((item) => {
-            const id = clean(item.getAttribute('data-item-id') || '');
-            const title = clean(
-              item.querySelector('.chapter-title')?.textContent ||
-              item.querySelector('.chapter-content')?.textContent ||
-              item.textContent ||
-              ''
-            );
-            const status = clean(item.querySelector('.chapter-status, .chapter-meta')?.textContent || '');
-            const cls = item.className || '';
-            const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
-            if (title) out.push({ group: groupTitle, chapter_id: id, chapter_title: title, status, is_current: isCurrent });
-          });
-        });
-      }
-
-      if (out.length === 0) {
-        const items = Array.from(document.querySelectorAll('.chapter-list .vc-chapter-item, .vc-chapter-item[data-item-id]'));
-        items.forEach((item) => {
-          const id = clean(item.getAttribute('data-item-id') || '');
-          const title = clean(
-            item.querySelector('.chapter-title')?.textContent ||
-            item.querySelector('.chapter-content')?.textContent ||
-            item.textContent ||
-            ''
-          );
-          const status = clean(item.querySelector('.chapter-status, .chapter-meta')?.textContent || '');
-          const cls = item.className || '';
-          const isCurrent = /active|current|selected|is-active/.test(cls) || item.getAttribute('aria-current') === 'true';
-          if (title) out.push({ group: '', chapter_id: id, chapter_title: title, status, is_current: isCurrent });
-        });
-      }
-
-      return out;
-    })()
-  `) as Array<{ group?: string; chapter_id?: string; chapter_title?: string; status?: string; is_current?: boolean }> | null;
-
-  const normalized = (rows ?? []).map((row, index) => ({
-    rank: index + 1,
-    group: cleanText(row.group ?? ''),
-    chapter_id: cleanText(row.chapter_id ?? ''),
-    chapter_title: cleanText(row.chapter_title ?? ''),
-    status: cleanText(row.status ?? ''),
-    is_current: !!row.is_current,
-  }));
+  const normalized = await evaluateScysTocRows(page);
 
   if (normalized.length === 0) {
     throw new EmptyResultError('scys/toc', 'No chapter list was detected on this course page');

@@ -9,10 +9,25 @@ export interface ScysCourseSummary {
   course_id: string;
   toc_summary: string;
   url: string;
+  raw_url: string;
+  updated_at_text: string;
+  copyright_text: string;
+  prev_chapter: string;
+  next_chapter: string;
+  participant_count: number;
+  discussion_hint: string;
+  links: string[];
+  images: string[];
+  image_count: number;
+  content_images: string[];
+  content_image_count: number;
+  image_dir?: string;
 }
 
 export interface ScysTocRow {
   rank: number;
+  entry_type?: 'section' | 'chapter';
+  section?: string;
   group: string;
   chapter_id: string;
   chapter_title: string;
