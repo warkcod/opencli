@@ -14,7 +14,7 @@ cli({
     { name: 'limit', type: 'int', default: 20, help: 'Max number of cards' },
     { name: 'wait', type: 'int', default: 3, help: 'Seconds to wait after page load' },
   ],
-  columns: ['rank', 'author', 'time', 'badge', 'title', 'preview', 'tags', 'interactions', 'link'],
+  columns: ['rank', 'author', 'time', 'flags', 'title', 'summary', 'tags', 'interactions_display', 'image_count', 'url'],
   func: async (page, kwargs) => {
     return extractScysFeed(page, String(kwargs.url ?? buildScysHomeEssenceUrl()), {
       waitSeconds: Number(kwargs.wait ?? 3),

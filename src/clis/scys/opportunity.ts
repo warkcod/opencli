@@ -21,7 +21,7 @@ cli({
     { name: 'download-images', type: 'boolean', default: false, help: 'Download post images to local directory' },
     { name: 'output', default: './scys-opportunity-downloads', help: 'Image output directory' },
   ],
-  columns: ['rank', 'author', 'time', 'flags', 'title', 'content', 'ai_summary', 'tags', 'interactions', 'link', 'image_count', 'image_dir'],
+  columns: ['rank', 'author', 'time', 'flags', 'title', 'summary', 'ai_summary', 'tags', 'interactions_display', 'image_count', 'url', 'image_dir'],
   func: async (page, kwargs) => {
     const tab = normalizeOpportunityTab(kwargs.tab);
     const rows = await extractScysOpportunity(page, String(kwargs.url ?? buildScysOpportunityUrl()), {
@@ -38,7 +38,7 @@ cli({
 
     const withDownloads = [];
     for (const row of rows) {
-      const imageUrls = Array.isArray(row.image_urls) ? row.image_urls.filter(Boolean) : [];
+      const imageUrls = Array.isArray(row.images) ? row.images.filter(Boolean) : [];
       if (imageUrls.length === 0) {
         withDownloads.push({ ...row, image_count: 0, image_dir: '' });
         continue;

@@ -134,6 +134,7 @@ export default defineConfig({
                 { text: 'Architecture', link: '/developer/architecture' },
                 { text: 'YAML Adapter Guide', link: '/developer/yaml-adapter' },
                 { text: 'TypeScript Adapter Guide', link: '/developer/ts-adapter' },
+                { text: 'SCYS Schema Guidelines', link: '/developer/scys-schema-guidelines' },
                 { text: 'AI Workflow', link: '/developer/ai-workflow' },
               ],
             },

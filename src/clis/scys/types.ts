@@ -24,29 +24,35 @@ export interface ScysFeedRow {
   rank: number;
   author: string;
   time: string;
-  badge: string;
+  flags: string[];
   title: string;
-  preview: string;
-  tags: string;
-  interactions: string;
-  link: string;
+  summary: string;
+  tags: string[];
+  interactions: ScysArticleInteractions;
+  interactions_display: string;
+  url: string;
+  raw_url: string;
+  images: string[];
+  image_count: number;
 }
 
 export interface ScysOpportunityRow {
   rank: number;
   author: string;
   time: string;
-  flags: string;
+  flags: string[];
   title: string;
-  content: string;
+  summary: string;
   ai_summary: string;
-  tags: string;
-  interactions: string;
-  link: string;
+  tags: string[];
+  interactions: ScysArticleInteractions;
+  interactions_display: string;
+  url: string;
+  raw_url: string;
   topic_id?: string;
   entity_type?: string;
-  image_urls?: string[];
-  image_count?: number;
+  images: string[];
+  image_count: number;
   image_dir?: string;
 }
 
@@ -75,6 +81,7 @@ export interface ScysArticleSummary {
   entity_type: string;
   topic_id: string;
   url: string;
+  raw_url: string;
   title: string;
   author: string;
   time: string;
@@ -88,5 +95,4 @@ export interface ScysArticleSummary {
   external_link_count: number;
   external_links: string[];
   source_links: string[];
-  raw_link: string;
 }

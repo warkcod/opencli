@@ -3,7 +3,6 @@ import type { IPage } from '../../types.js';
 import {
   cleanText,
   extractScysArticleMeta,
-  extractInteractions,
   extractScysCourseId,
   normalizeScysUrl,
   toScysArticleUrl,
@@ -11,6 +10,7 @@ import {
 } from './common.js';
 import type {
   ScysActivitySummary,
+  ScysArticleInteractions,
   ScysArticleSummary,
   ScysCourseSummary,
   ScysFeedRow,
@@ -69,19 +69,54 @@ function pickPreferredScysLink(candidates: Array<unknown>): string {
   return links[0] ?? '';
 }
 
-function formatScysInteractions(like: unknown, comments: unknown, favorites: unknown, fallback?: unknown): string {
+function parseCnNumberToken(token: string): number {
+  const raw = cleanText(token);
+  if (!raw) return 0;
+  const numeric = Number(raw.replace(/[万亿]/g, ''));
+  if (!Number.isFinite(numeric)) return 0;
+  if (raw.endsWith('万')) return Math.floor(numeric * 10_000);
+  if (raw.endsWith('亿')) return Math.floor(numeric * 100_000_000);
+  return Math.floor(numeric);
+}
+
+function parseInteractionCounts(raw: unknown): { likes: number; comments: number; favorites: number } {
+  const text = cleanText(raw);
+  if (!text) return { likes: 0, comments: 0, favorites: 0 };
+
+  const matched = text.match(/[0-9]+(?:\.[0-9]+)?(?:万|亿)?/g) ?? [];
+  return {
+    likes: parseCnNumberToken(matched[0] ?? ''),
+    comments: parseCnNumberToken(matched[1] ?? ''),
+    favorites: parseCnNumberToken(matched[2] ?? ''),
+  };
+}
+
+function buildScysInteractions(
+  like: unknown,
+  comments: unknown,
+  favorites: unknown,
+  fallback?: unknown
+): ScysArticleInteractions {
   const likeCount = Number(like);
   const commentCount = Number(comments);
   const favoriteCount = Number(favorites);
   if ([likeCount, commentCount, favoriteCount].every((n) => Number.isFinite(n) && n >= 0)) {
-    return `点赞${Math.floor(likeCount)} 评论${Math.floor(commentCount)} 收藏${Math.floor(favoriteCount)}`;
+    const likes = Math.floor(likeCount);
+    const commentsValue = Math.floor(commentCount);
+    const favoritesValue = Math.floor(favoriteCount);
+    return {
+      likes,
+      comments: commentsValue,
+      favorites: favoritesValue,
+      display: `点赞${likes} 评论${commentsValue} 收藏${favoritesValue}`,
+    };
   }
 
-  const text = cleanText(fallback);
-  if (!text) return '';
-  const pieces = text.match(/[0-9]+(?:\.[0-9]+)?(?:万|亿)?/g);
-  if (!pieces || pieces.length === 0) return text;
-  return `点赞${pieces[0] ?? '0'} 评论${pieces[1] ?? '0'} 收藏${pieces[2] ?? '0'}`;
+  const parsed = parseInteractionCounts(fallback);
+  return {
+    ...parsed,
+    display: `点赞${parsed.likes} 评论${parsed.comments} 收藏${parsed.favorites}`,
+  };
 }
 
 function trimWithLimit(value: unknown, maxLength: number): string {
@@ -119,6 +154,14 @@ function isLikelyExternalLink(url: string): boolean {
 
 function normalizeMaybeBrokenUrl(raw: unknown): string {
   return cleanText(raw).replace(/\s+/g, '');
+}
+
+function isLikelyFalsePositiveLink(url: string): boolean {
+  const normalized = normalizeMaybeBrokenUrl(url);
+  if (!/^https?:\/\//i.test(normalized)) return false;
+  // Heuristic: markdown/autolink-like false positives such as "7.AI" in numbered lists.
+  // Example false extraction: http://7.AI
+  return /^https?:\/\/\d+\.[a-z]{2,}\/?$/i.test(normalized);
 }
 
 export async function ensureScysFeedReady(page: IPage): Promise<void> {
@@ -559,16 +602,27 @@ export async function extractScysArticle(page: IPage, inputUrl: string, opts: Ex
     ])
   ).filter((tag) => !flags.includes(tag));
 
-  const likes = extractFirstNumber(payload.likeText);
-  const comments = extractFirstNumber(payload.commentText);
-  const favorites = extractFirstNumber(payload.favoriteText);
-  const display = `点赞${likes} 评论${comments} 收藏${favorites}`;
+  const interactions = buildScysInteractions(
+    extractFirstNumber(payload.likeText),
+    extractFirstNumber(payload.commentText),
+    extractFirstNumber(payload.favoriteText)
+  );
 
   const sourceLinks = Array.from(
-    new Set((payload.sourceLinks ?? []).map((href) => normalizeMaybeBrokenUrl(href)).filter(Boolean))
+    new Set(
+      (payload.sourceLinks ?? [])
+        .map((href) => normalizeMaybeBrokenUrl(href))
+        .filter(Boolean)
+        .filter((href) => !isLikelyFalsePositiveLink(href))
+    )
   );
   const externalLinks = Array.from(
-    new Set((payload.externalLinks ?? []).map((href) => normalizeMaybeBrokenUrl(href)).filter(isLikelyExternalLink))
+    new Set(
+      (payload.externalLinks ?? [])
+        .map((href) => normalizeMaybeBrokenUrl(href))
+        .filter(isLikelyExternalLink)
+        .filter((href) => !isLikelyFalsePositiveLink(href))
+    )
   );
   const images = Array.from(
     new Set((payload.images ?? []).map((src) => normalizeMaybeBrokenUrl(src)).filter(Boolean))
@@ -594,18 +648,13 @@ export async function extractScysArticle(page: IPage, inputUrl: string, opts: Ex
     flags,
     content,
     ai_summary: aiSummary,
-    interactions: {
-      likes,
-      comments,
-      favorites,
-      display,
-    },
+    interactions,
     image_count: images.length,
     images,
     external_link_count: externalLinks.length,
     external_links: externalLinks,
     source_links: sourceLinks,
-    raw_link: normalizeScysUrl(payload.pageUrl || url),
+    raw_url: normalizeScysUrl(payload.pageUrl || url),
   };
 }
 
@@ -685,24 +734,36 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
       const menuValues = Array.isArray(topic.menuList)
         ? topic.menuList.map((m: any) => cleanText(m?.value)).filter(Boolean)
         : [];
+      const tags = Array.from(new Set(menuValues.map((v: string) => polishScysText(v)).filter(Boolean)));
       const topicId = cleanText(topic.topicId || topic.entityId);
       const entityType = cleanText(topic.entityType || 'xq_topic');
+      const url = pickPreferredScysLink([
+        item?.detailUrl,
+        buildScysTopicLink(entityType, topicId),
+        topic?.externalLink,
+      ]);
+      const images = Array.isArray(topic.imageList)
+        ? topic.imageList.map((u: unknown) => cleanText(u)).filter(Boolean)
+        : [];
+      const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
+      const flags = topic.isDigested ? ['精华'] : [];
+      const summary = trimWithLimit(stripScysRichText(topic.articleContent), maxLength);
       return {
         rank: index + 1,
         author: polishScysText(user.name),
         time: formatScysRelativeTime(topic.gmtCreate),
-        badge: topic.isDigested ? '精华' : '',
+        flags,
         title: polishScysText(stripScysRichText(topic.showTitle)),
-        preview: trimWithLimit(stripScysRichText(topic.articleContent), maxLength),
-        tags: Array.from(new Set(menuValues.map((v: string) => polishScysText(v)).filter(Boolean))).join(', '),
-        interactions: formatScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount),
-        link: pickPreferredScysLink([
-          item?.detailUrl,
-          buildScysTopicLink(entityType, topicId),
-          topic?.externalLink,
-        ]),
+        summary,
+        tags,
+        interactions,
+        interactions_display: interactions.display,
+        url,
+        raw_url: url,
+        images,
+        image_count: images.length,
       };
-    }).filter((row: ScysFeedRow) => row.title || row.preview);
+    }).filter((row: ScysFeedRow) => row.title || row.summary);
   }
 
   // DOM fallback for cases where interceptor is blocked or request timing misses.
@@ -770,18 +831,27 @@ export async function extractScysFeed(page: IPage, inputUrl: string, opts: Extra
         .replace(/\s+/g, ' ')
         .trim();
       const [authorByLine, timeByLine] = userLine.split('·').map((part) => cleanText(part));
+      const tags = Array.from(new Set((row.tags ?? []).map((tag: string) => polishScysText(tag)).filter(Boolean)));
+      const flags = row.badge ? [polishScysText(row.badge)] : [];
+      const summary = trimWithLimit(row.preview ?? '', maxLength);
+      const interactions = buildScysInteractions(undefined, undefined, undefined, row.interactions || row.meta_line);
+      const url = pickPreferredScysLink(row.links ?? []);
       return {
         rank: index + 1,
         author: polishScysText(row.author ?? authorByLine),
         time: cleanText(row.time ?? timeByLine),
-        badge: polishScysText(row.badge ?? ''),
+        flags,
         title: polishScysText(row.title ?? '').replace(/^(精华|热门)\s*/, ''),
-        preview: trimWithLimit(row.preview ?? '', maxLength),
-        tags: Array.from(new Set((row.tags ?? []).map((tag: string) => polishScysText(tag)).filter(Boolean))).join(', '),
-        interactions: formatScysInteractions(undefined, undefined, undefined, row.interactions || row.meta_line),
-        link: pickPreferredScysLink(row.links ?? []),
+        summary,
+        tags,
+        interactions,
+        interactions_display: interactions.display,
+        url,
+        raw_url: url,
+        images: [],
+        image_count: 0,
       };
-    }).filter((row) => row.title || row.preview);
+    }).filter((row) => row.title || row.summary);
   }
 
   if (normalized.length === 0) {
@@ -851,30 +921,35 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
         : [];
       const { flags, tags } = splitOpportunityFlagsAndTags(menuValues);
 
-      const likeCount = Number(topic.likeCount ?? 0) || 0;
-      const commentCount = Number(topic.commentsCount ?? 0) || 0;
-      const favoriteCount = Number(topic.favoriteCount ?? 0) || 0;
+      const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
 
       const entityType = cleanText(topic.entityType);
       const topicId = cleanText(topic.topicId || topic.entityId);
-      const imageUrls = Array.isArray(topic.imageList)
+      const images = Array.isArray(topic.imageList)
         ? topic.imageList.map((u: unknown) => cleanText(u)).filter(Boolean)
         : [];
+      const url = cleanText(item.detailUrl) || buildScysTopicLink(entityType, topicId);
+      const normalizedFlags = flags.map((f: string) => polishScysText(f)).filter(Boolean);
+      const normalizedTags = tags.map((t: string) => polishScysText(t)).filter(Boolean);
+      const summary = polishScysText(stripScysRichText(topic.articleContent));
 
       return {
         rank: index + 1,
         author: polishScysText(user.name),
         time: formatScysRelativeTime(topic.gmtCreate),
-        flags: flags.map((f: string) => polishScysText(f)).filter(Boolean).join(', '),
+        flags: normalizedFlags,
         title: polishScysText(stripScysRichText(topic.showTitle)),
-        content: polishScysText(stripScysRichText(topic.articleContent)),
+        summary,
         ai_summary: polishScysText(parseAiSummaryText(topic.aiSummaryContent)),
-        tags: tags.map((t: string) => polishScysText(t)).filter(Boolean).join(', '),
-        interactions: `点赞${likeCount} 评论${commentCount} 收藏${favoriteCount}`,
-        link: cleanText(item.detailUrl) || buildScysTopicLink(entityType, topicId),
+        tags: normalizedTags,
+        interactions,
+        interactions_display: interactions.display,
+        url,
+        raw_url: url,
         topic_id: topicId,
         entity_type: entityType,
-        image_urls: imageUrls,
+        images,
+        image_count: images.length,
       };
     });
   }
@@ -927,23 +1002,30 @@ export async function extractScysOpportunity(page: IPage, inputUrl: string, opts
     }> | null;
 
     normalized = (rows ?? []).slice(0, limit).map((row, index) => {
-      const imageUrls = (row.image_urls ?? []).map((u) => cleanText(u)).filter(Boolean);
-      const topicId = inferTopicIdFromImageUrls(imageUrls);
+      const images = (row.image_urls ?? []).map((u) => cleanText(u)).filter(Boolean);
+      const topicId = inferTopicIdFromImageUrls(images);
       const tags = Array.from(new Set((row.tags ?? []).map((tag: string) => cleanText(tag)).filter(Boolean)));
+      const interactions = buildScysInteractions(undefined, undefined, undefined, row.interactions ?? '');
+      const summary = polishScysText(stripScysRichText(row.content ?? ''));
+      const url = cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId);
+      const normalizedFlags = (row.flags ?? []).map((f: string) => polishScysText(f)).filter(Boolean);
       return {
         rank: index + 1,
         author: polishScysText(row.author ?? ''),
         time: cleanText(row.time ?? ''),
-        flags: (row.flags ?? []).map((f: string) => polishScysText(f)).filter(Boolean).join(', '),
+        flags: normalizedFlags,
         title: polishScysText(stripScysRichText(row.title ?? '')),
-        content: polishScysText(stripScysRichText(row.content ?? '')),
+        summary,
         ai_summary: polishScysText(stripScysRichText(row.ai_summary ?? '')),
-        tags: tags.map((tag: string) => polishScysText(tag)).filter(Boolean).join(', '),
-        interactions: extractInteractions(row.interactions ?? ''),
-        link: cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId),
+        tags: tags.map((tag: string) => polishScysText(tag)).filter(Boolean),
+        interactions,
+        interactions_display: interactions.display,
+        url,
+        raw_url: url,
         topic_id: topicId,
         entity_type: topicId ? 'xq_topic' : '',
-        image_urls: imageUrls,
+        images,
+        image_count: images.length,
       };
     });
   }
