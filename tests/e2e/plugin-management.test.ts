@@ -134,7 +134,7 @@ describe('plugin management E2E', () => {
 
   it('plugin update without name or --all shows error', async () => {
     const { stderr, code } = await runPluginCli(['plugin', 'update']);
-    expect(code).toBe(1);
+    expect(code).toBe(2);
     expect(stderr).toContain('specify a plugin name');
   });
 });

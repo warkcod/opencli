@@ -119,10 +119,12 @@ git clone git@github.com:jackwener/opencli.git && cd opencli && npm install && n
 |------|----------|
 | **xiaohongshu** | `search` `feed` `user` `download` `publish` `comments` `notifications` `creator-notes` `creator-notes-summary` `creator-note-detail` `creator-profile` `creator-stats` |
 | **bilibili** | `hot` `search` `history` `feed` `ranking` `download` `comments` `dynamic` `favorite` `following` `me` `subtitle` `user-videos` |
+| **tieba** | `hot` `posts` `search` `read` |
 | **twitter** | `trending` `search` `timeline` `bookmarks` `post` `download` `profile` `article` `like` `likes` `notifications` `reply` `reply-dm` `thread` `follow` `unfollow` `followers` `following` `block` `unblock` `bookmark` `unbookmark` `delete` `hide-reply` `accept` |
 | **reddit** | `hot` `frontpage` `popular` `search` `subreddit` `user` `user-posts` `user-comments` `read` `save` `saved` `subscribe` `upvote` `upvoted` `comment` |
+| **spotify** | `auth` `status` `play` `pause` `next` `prev` `volume` `search` `queue` `shuffle` `repeat` |
 
-65+ adapters in total — **[→ see all supported sites & commands](./docs/adapters/index.md)**
+66+ adapters in total — **[→ see all supported sites & commands](./docs/adapters/index.md)**
 
 ## CLI Hub
 
@@ -133,8 +135,9 @@ OpenCLI acts as a universal hub for your existing command-line tools — unified
 | **gh** | GitHub CLI | `opencli gh pr list --limit 5` |
 | **obsidian** | Obsidian vault management | `opencli obsidian search query="AI"` |
 | **docker** | Docker | `opencli docker ps` |
-| **gws** | Google Workspace CLI | `opencli gws docs list` |
 | **lark-cli** | Lark/Feishu — messages, docs, calendar, tasks, 200+ commands | `opencli lark-cli calendar +agenda` |
+| **dingtalk** | DingTalk — cross-platform CLI for DingTalk's full suite, designed for humans and AI agents | `opencli dingtalk msg send --to user "hello"` |
+| **wecom** | WeCom/企业微信 — CLI for WeCom open platform, for humans and AI agents | `opencli wecom msg send --to user "hello"` |
 | **vercel** | Vercel — deploy projects, manage domains, env vars, logs | `opencli vercel deploy --prod` |
 
 **Register your own** — add any local CLI so AI agents can discover it via `opencli list`:
@@ -190,6 +193,28 @@ All built-in commands support `--format` / `-f` with `table` (default), `json`, 
 opencli bilibili hot -f json    # Pipe to jq or LLMs
 opencli bilibili hot -f csv     # Spreadsheet-friendly
 opencli bilibili hot -v         # Verbose: show pipeline debug steps
+```
+
+## Exit Codes
+
+opencli follows Unix `sysexits.h` conventions so it integrates naturally with shell pipelines and CI scripts:
+
+| Code | Meaning | When |
+|------|---------|------|
+| `0` | Success | Command completed normally |
+| `1` | Generic error | Unexpected / unclassified failure |
+| `2` | Usage error | Bad arguments or unknown command |
+| `66` | Empty result | No data returned (`EX_NOINPUT`) |
+| `69` | Service unavailable | Browser Bridge not connected (`EX_UNAVAILABLE`) |
+| `75` | Temporary failure | Command timed out — retry (`EX_TEMPFAIL`) |
+| `77` | Auth required | Not logged in to target site (`EX_NOPERM`) |
+| `78` | Config error | Missing credentials or bad config (`EX_CONFIG`) |
+| `130` | Interrupted | Ctrl-C / SIGINT |
+
+```bash
+opencli spotify status || echo "exit $?"   # 69 if browser not running
+opencli github issues 2>/dev/null
+[ $? -eq 77 ] && opencli github auth       # auto-auth if not logged in
 ```
 
 ## Plugins
