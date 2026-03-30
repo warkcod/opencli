@@ -83,6 +83,10 @@ describe('detectScysPageType', () => {
     expect(detectScysPageType('https://scys.com/activity/landing/5505?tabIndex=1')).toBe('activity');
   });
 
+  it('detects article detail page', () => {
+    expect(detectScysPageType('https://scys.com/articleDetail/xq_topic/55188458224514554')).toBe('article');
+  });
+
   it('returns unknown for unsupported pages', () => {
     expect(detectScysPageType('https://scys.com/help')).toBe('unknown');
   });

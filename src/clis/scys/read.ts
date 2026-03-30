@@ -3,6 +3,7 @@ import { cli, Strategy } from '../../registry.js';
 import { detectScysPageType, inferScysReadUrl } from './common.js';
 import {
   extractScysActivity,
+  extractScysArticle,
   extractScysCourse,
   extractScysFeed,
   extractScysOpportunity,
@@ -49,9 +50,14 @@ cli({
       return { page_type: pageType, data };
     }
 
+    if (pageType === 'article') {
+      const data = await extractScysArticle(page, url, { waitSeconds, maxLength });
+      return { page_type: pageType, data };
+    }
+
     throw new ArgumentError(
       `Unsupported SCYS page for scys/read: ${url}`,
-      'Supported patterns: /course/detail/:id, /?filter=essence, /personal/:id?tab=posts, /opportunity, /activity/landing/:id'
+      'Supported patterns: /course/detail/:id, /?filter=essence, /personal/:id?tab=posts, /opportunity, /activity/landing/:id, /articleDetail/:entityType/:topicId'
     );
   },
 });

@@ -62,6 +62,7 @@ export function detectScysPageType(input: string): ScysPageType {
   if (pathname.startsWith('/course/detail/')) return 'course';
   if (pathname.startsWith('/opportunity')) return 'opportunity';
   if (pathname.startsWith('/activity/landing/')) return 'activity';
+  if (/^\/articleDetail\/[^/]+\/[^/]+$/.test(pathname)) return 'article';
 
   if (pathname.startsWith('/personal/')) {
     const tab = (url.searchParams.get('tab') || '').toLowerCase();

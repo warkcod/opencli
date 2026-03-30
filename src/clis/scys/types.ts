@@ -1,4 +1,4 @@
-export type ScysPageType = 'course' | 'feed' | 'opportunity' | 'activity' | 'unknown';
+export type ScysPageType = 'course' | 'feed' | 'opportunity' | 'activity' | 'article' | 'unknown';
 
 export interface ScysCourseSummary {
   course_title: string;
@@ -83,7 +83,9 @@ export interface ScysArticleSummary {
   content: string;
   ai_summary: string;
   interactions: ScysArticleInteractions;
+  image_count: number;
   images: string[];
+  external_link_count: number;
   external_links: string[];
   source_links: string[];
   raw_link: string;
