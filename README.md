@@ -10,7 +10,7 @@
 
 A CLI tool that turns **any website**, **Electron app**, or **local CLI tool** into a command-line interface — Bilibili, Zhihu, 小红书, Twitter/X, Reddit, YouTube, Antigravity, `gh`, `docker`, and [many more](#built-in-commands) — powered by browser session reuse and AI-native discovery.
 
-**Built for AI Agents** — Configure an instruction in your `AGENT.md` or `.cursorrules` to run `opencli list` via Bash. The AI will automatically discover and invoke all available tools.
+**Built for AI Agents** — Load the [`opencli-operate` skill](./skills/opencli-operate/SKILL.md) to give any AI agent (Claude Code, Cursor) direct browser control. Operate any website, then crystallize those interactions into reusable CLI commands. Configure `opencli list` in your `AGENT.md` or `.cursorrules` so the AI auto-discovers all available tools.
 
 **CLI Hub** — Register any local CLI (`opencli register mycli`) so AI agents can discover and call it alongside built-in commands. Auto-installs missing tools via your package manager (e.g. if `gh` isn't installed, `opencli gh ...` runs `brew install gh` first then re-executes seamlessly).
 
@@ -21,33 +21,17 @@ A CLI tool that turns **any website**, **Electron app**, or **local CLI tool** i
 ## Highlights
 
 - **CLI All Electron** — CLI-ify apps like Antigravity Ultra! Now AI can control itself natively.
+- **Browser Automation** — `operate` gives AI agents direct browser control: click, type, extract, screenshot — any interaction, fully scriptable.
+- **Website → CLI** — Turn any website into a deterministic CLI: 70+ pre-built adapters, or crystallize your own with `opencli record`.
 - **Account-safe** — Reuses Chrome's logged-in state; your credentials never leave the browser.
 - **Anti-detection built-in** — Patches `navigator.webdriver`, stubs `window.chrome`, fakes plugin lists, cleans ChromeDriver/Playwright globals, and strips CDP frames from Error stack traces. Extensive anti-fingerprinting and risk-control evasion measures baked in at every layer.
-- **AI Agent ready** — `explore` discovers APIs, `synthesize` generates adapters, `cascade` finds auth strategies.
+- **AI Agent ready** — `explore` discovers APIs, `synthesize` generates adapters, `cascade` finds auth strategies, `operate` controls the browser directly.
 - **External CLI Hub** — Discover, auto-install, and passthrough commands to any external CLI (gh, obsidian, docker, etc). Zero setup.
 - **Self-healing setup** — `opencli doctor` diagnoses and auto-starts the daemon, extension, and live browser connectivity.
 - **Dynamic Loader** — Simply drop `.ts` or `.yaml` adapters into the `clis/` folder for auto-registration.
-- **Dual-Engine Architecture** — Supports both YAML declarative data pipelines and robust browser runtime TypeScript injections.
-
-## Why opencli?
-
-There are many great browser automation tools. Here's when opencli is the right choice:
-
-| Your need | Best tool | Why |
-|-----------|-----------|-----|
-| Scheduled data extraction from specific sites | **opencli** | Pre-built adapters, deterministic JSON, zero LLM cost |
-| AI agent needs reliable site operations | **opencli** | Hundreds of commands, structured output, fast deterministic response |
-| Explore an unknown website ad-hoc | Browser-Use, Stagehand | LLM-driven general browsing for one-off tasks |
-| Large-scale web crawling | Crawl4AI, Scrapy | Purpose-built for throughput and scale |
-| Control desktop Electron apps from terminal | **opencli** | CDP + AppleScript — the only CLI tool that does this |
-
-**What makes opencli different:**
-
 - **Zero LLM cost** — No tokens consumed at runtime. Run 10,000 times and pay nothing.
 - **Deterministic** — Same command, same output schema, every time. Pipeable, scriptable, CI-friendly.
 - **Broad coverage** — 73+ sites across global and Chinese platforms (Bilibili, Zhihu, Xiaohongshu, Reddit, HackerNews, and more), plus desktop Electron apps via CDP.
-
-> For a detailed comparison with Browser-Use, Crawl4AI, Firecrawl, and others, see the [Comparison Guide](./docs/comparison.md).
 
 ---
 
@@ -86,21 +70,9 @@ opencli bilibili hot --limit 5         # Browser command (requires Extension)
 
 ### 4. Browser Automation — Make Websites Accessible for AI Agents
 
-#### AI Agent Quickstart (1 step)
+Point your AI agent (Claude Code, Cursor) to [`skills/opencli-operate/SKILL.md`](./skills/opencli-operate/SKILL.md). It has everything needed — full command reference, examples, and workflow.
 
-Point your AI agent (Claude Code, Cursor) to [`skills/opencli-operate/SKILL.md`](./skills/opencli-operate/SKILL.md). It has everything needed.
-
-#### Human Quickstart (3 steps)
-
-```bash
-opencli operate open https://news.ycombinator.com    # 1. Open a page
-opencli operate state                                 # 2. See interactive elements
-opencli operate eval "document.title"                 # 3. Extract data
-```
-
-More commands: `click`, `type`, `select`, `keys`, `wait`, `get`, `screenshot`, `scroll`, `back`, `eval`, `network`, `init`, `verify`, `close`.
-
-See [`skills/opencli-operate/SKILL.md`](./skills/opencli-operate/SKILL.md) for full documentation.
+Available commands: `open`, `state`, `click`, `type`, `select`, `keys`, `wait`, `get`, `screenshot`, `scroll`, `back`, `eval`, `network`, `init`, `verify`, `close`.
 
 ### Update
 
