@@ -5,6 +5,7 @@ function createScysPageMock({
     loginState,
     evaluateResults = [],
     interceptedRequests = [],
+    evaluateMock,
 } = {}) {
     const queue = [...evaluateResults];
     return {
@@ -20,6 +21,9 @@ function createScysPageMock({
                     routeLooksLikeLogin: false,
                     loginCtaText: false,
                 };
+            }
+            if (typeof evaluateMock === 'function') {
+                return evaluateMock(js, queue);
             }
             return queue.shift();
         },
@@ -47,6 +51,59 @@ function createScysPageMock({
 }
 
 describe('extractScysFeed', () => {
+    it('uses an explicit authenticated essence request instead of relying on stale tab-switch captures', async () => {
+        const page = createScysPageMock({
+            evaluateMock: (js) => {
+                if (js.includes("__user_token.v3") && js.includes("isDigested")) {
+                    return {
+                        ok: true,
+                        status: 200,
+                        items: [
+                            {
+                                detailUrl: null,
+                                topicDTO: {
+                                    topicId: '22255855424524441',
+                                    entityType: 'xq_topic',
+                                    showTitle: '昨天直播的分享内容整理出来了，没想到直播了四个半小时，讲了123 万字，还是聊了挺多内容的。',
+                                    articleContent: '没来得及看直播的圈友，可以进生财有术视频号。',
+                                    gmtCreate: 1_776_145_020,
+                                    likeCount: 12,
+                                    commentsCount: 3,
+                                    favoriteCount: 4,
+                                    isDigested: true,
+                                    menuList: [{ value: '亦仁' }],
+                                },
+                                topicUserDTO: {
+                                    name: '亦仁',
+                                },
+                            },
+                        ],
+                    };
+                }
+                if (js.includes("window.__opencli_xhr") || js.includes("__opencli_interceptor_patched")) {
+                    throw new Error('stale interceptor path should not run when direct essence API succeeds');
+                }
+                return undefined;
+            },
+        });
+
+        const rows = await extractScysFeed(page, 'https://scys.com/?filter=essence', {
+            waitSeconds: 1,
+            limit: 1,
+            maxLength: 600,
+        });
+
+        expect(rows).toEqual([
+            expect.objectContaining({
+                topic_id: '22255855424524441',
+                entity_type: 'xq_topic',
+                url: 'https://scys.com/articleDetail/xq_topic/22255855424524441',
+                flags: ['精华'],
+                title: '昨天直播的分享内容整理出来了，没想到直播了四个半小时，讲了123 万字，还是聊了挺多内容的。',
+            }),
+        ]);
+    });
+
     it('keeps SCYS detail identity even when the list item also has an external source link', async () => {
         const page = createScysPageMock({
             evaluateResults: [undefined, undefined],
@@ -98,8 +155,73 @@ describe('extractScysFeed', () => {
 });
 
 describe('extractScysOpportunity', () => {
+    it('uses an explicit authenticated opportunity request instead of relying on tab toggles', async () => {
+        const page = createScysPageMock({
+            evaluateMock: (js) => {
+                if (js.includes("__user_token.v3") && js.includes("pageScene") && js.includes('"fxb"')) {
+                    return {
+                        ok: true,
+                        status: 200,
+                        items: [
+                            {
+                                detailUrl: null,
+                                topicDTO: {
+                                    topicId: '55522122458215244',
+                                    entityType: 'xq_topic',
+                                    showTitle: '信息差外面卖几千块的GPTPlus技术原理拆解',
+                                    articleContent: '本文仅供技术交流。',
+                                    externalLink: 'https://flex-fox.feishu.cn/wiki/BdGkw2dqDiDBPWkkOhvcrJ7tnCe?from=from_copylink',
+                                    gmtCreate: 1_776_145_020,
+                                    likeCount: 12,
+                                    commentsCount: 3,
+                                    favoriteCount: 4,
+                                    menuList: [{ value: '信息差' }, { value: 'ChatGPT' }, { value: '项目实操' }],
+                                    imageList: ['https://search01.shengcaiyoushu.com/upload/doc/Lfw7drrJKoO7dgx3nVYccY8hnAd/HRVOb2QkCoafpCxX0YIcqKOdnFd'],
+                                },
+                                topicUserDTO: {
+                                    name: '阿霖',
+                                },
+                            },
+                        ],
+                    };
+                }
+                if (js.includes("window.__opencli_xhr") || js.includes("__opencli_interceptor_patched")) {
+                    throw new Error('stale interceptor path should not run when direct opportunity API succeeds');
+                }
+                return undefined;
+            },
+        });
+
+        const rows = await extractScysOpportunity(page, 'https://scys.com/opportunity', {
+            waitSeconds: 1,
+            limit: 1,
+            tab: '全部',
+        });
+
+        expect(rows).toEqual([
+            expect.objectContaining({
+                topic_id: '55522122458215244',
+                entity_type: 'xq_topic',
+                url: 'https://scys.com/articleDetail/xq_topic/55522122458215244',
+                raw_url: 'https://scys.com/articleDetail/xq_topic/55522122458215244',
+                external_links: ['https://flex-fox.feishu.cn/wiki/BdGkw2dqDiDBPWkkOhvcrJ7tnCe?from=from_copylink'],
+                source_links: ['https://flex-fox.feishu.cn/wiki/BdGkw2dqDiDBPWkkOhvcrJ7tnCe?from=from_copylink'],
+            }),
+        ]);
+    });
+
     it('recovers topic identity from page cache when DOM fallback only sees an external link', async () => {
         const page = createScysPageMock({
+            interceptedRequests: [],
+            evaluateMock: (js, queue) => {
+                if (js.includes("__user_token.v3") && js.includes('"fxb"')) {
+                    return { ok: false, status: 401, items: [] };
+                }
+                if (queue.length > 0) {
+                    return queue.shift();
+                }
+                return undefined;
+            },
             evaluateResults: [
                 undefined,
                 [
@@ -128,7 +250,6 @@ describe('extractScysOpportunity', () => {
                     },
                 ],
             ],
-            interceptedRequests: [],
         });
 
         const rows = await extractScysOpportunity(page, 'https://scys.com/opportunity', {

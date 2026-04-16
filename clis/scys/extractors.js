@@ -183,6 +183,147 @@ function enrichScysListRows(rows, cacheEntries) {
         };
     });
 }
+async function requestScysSearchTopic(page, body) {
+    const response = await page.evaluate(`
+    (() => {
+      const getStorage = (name) => {
+        try {
+          return window[name];
+        } catch {
+          return null;
+        }
+      };
+      const storage = getStorage('localStorage');
+      const token = storage && typeof storage.getItem === 'function'
+        ? (storage.getItem('__user_token.v3') || '')
+        : '';
+      const requestBody = ${JSON.stringify(body)};
+
+      return (async () => {
+        if (!token) {
+          return { ok: false, status: 0, items: [], error: 'missing-token' };
+        }
+        try {
+          const resp = await fetch('/shengcai-web/client/homePage/searchTopic', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+              'content-type': 'application/json',
+              'X-TOKEN': token,
+            },
+            body: JSON.stringify(requestBody),
+          });
+          let json = null;
+          try {
+            json = await resp.json();
+          } catch {}
+          const data = json?.data ?? json ?? {};
+          const items = Array.isArray(data.items) ? data.items : [];
+          return {
+            ok: resp.ok,
+            status: resp.status,
+            items,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            status: 0,
+            items: [],
+            error: String(error),
+          };
+        }
+      })();
+    })()
+  `);
+    if (!response || typeof response !== 'object' || response.ok !== true || !Array.isArray(response.items)) {
+        return [];
+    }
+    return response.items;
+}
+function normalizeScysFeedApiRows(items, limit, maxLength) {
+    return (items ?? []).slice(0, limit).map((item, index) => {
+        const topic = item?.topicDTO ?? {};
+        const user = item?.topicUserDTO ?? {};
+        const menuValues = Array.isArray(topic.menuList)
+            ? topic.menuList.map((m) => cleanText(m?.value)).filter(Boolean)
+            : [];
+        const tags = Array.from(new Set(menuValues.map((v) => polishScysText(v)).filter(Boolean)));
+        const topicId = cleanText(topic.topicId || topic.entityId);
+        const entityType = cleanText(topic.entityType || 'xq_topic');
+        const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
+            item?.detailUrl,
+            topic?.externalLink,
+        ]);
+        const images = Array.isArray(topic.imageList)
+            ? topic.imageList.map((u) => cleanText(u)).filter(Boolean)
+            : [];
+        const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
+        const flags = topic.isDigested ? ['精华'] : [];
+        const summary = trimWithLimit(stripScysRichText(topic.articleContent), maxLength);
+        return {
+            rank: index + 1,
+            author: polishScysText(user.name),
+            time: formatScysRelativeTime(topic.gmtCreate),
+            flags,
+            title: polishScysText(stripScysRichText(topic.showTitle)),
+            summary,
+            tags,
+            interactions,
+            interactions_display: interactions.display,
+            topic_id: topicId,
+            entity_type: entityType,
+            url: links.url,
+            raw_url: links.raw_url,
+            source_links: links.source_links,
+            external_links: links.external_links,
+            images,
+            image_count: images.length,
+        };
+    }).filter((row) => row.title || row.summary);
+}
+function normalizeScysOpportunityApiRows(items, limit) {
+    return (items ?? []).slice(0, limit).map((item, index) => {
+        const topic = item?.topicDTO ?? {};
+        const user = item?.topicUserDTO ?? {};
+        const menuValues = Array.isArray(topic.menuList)
+            ? topic.menuList.map((m) => cleanText(m?.value)).filter(Boolean)
+            : [];
+        const { flags, tags } = splitOpportunityFlagsAndTags(menuValues);
+        const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
+        const entityType = cleanText(topic.entityType || 'xq_topic');
+        const topicId = cleanText(topic.topicId || topic.entityId);
+        const images = Array.isArray(topic.imageList)
+            ? topic.imageList.map((u) => cleanText(u)).filter(Boolean)
+            : [];
+        const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
+            item?.detailUrl,
+            topic?.externalLink,
+        ]);
+        const normalizedFlags = flags.map((f) => polishScysText(f)).filter(Boolean);
+        const normalizedTags = tags.map((t) => polishScysText(t)).filter(Boolean);
+        const summary = polishScysText(stripScysRichText(topic.articleContent));
+        return {
+            rank: index + 1,
+            author: polishScysText(user.name),
+            time: formatScysRelativeTime(topic.gmtCreate),
+            flags: normalizedFlags,
+            title: polishScysText(stripScysRichText(topic.showTitle)),
+            summary,
+            ai_summary: polishScysText(parseAiSummaryText(topic.aiSummaryContent)),
+            tags: normalizedTags,
+            interactions,
+            interactions_display: interactions.display,
+            url: links.url,
+            raw_url: links.raw_url,
+            topic_id: topicId,
+            entity_type: entityType,
+            source_links: links.source_links,
+            external_links: links.external_links,
+            images,
+            image_count: images.length,
+        };
+    });
+}
 function parseCnNumberToken(token) {
     const raw = cleanText(token);
     if (!raw)
@@ -1086,13 +1227,27 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
     const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 3));
     const limit = Math.max(1, Number(opts.limit ?? 20));
     const maxLength = Math.max(120, Number(opts.maxLength ?? 600));
+    const parsedUrl = new URL(url);
+    const isHomeEssence = (parsedUrl.pathname === '/' || parsedUrl.pathname === '')
+        && (parsedUrl.searchParams.get('filter') || '').toLowerCase() === 'essence';
     await gotoAndWait(page, url, waitSeconds);
     await ensureScysLogin(page);
     await ensureScysFeedReady(page);
-    // API-first extraction:
-    // feed pages use /shengcai-web/client/homePage/searchTopic as list source.
-    await page.installInterceptor('shengcai-web/client');
-    await page.evaluate(`
+    let normalized = [];
+    if (isHomeEssence) {
+        normalized = normalizeScysFeedApiRows(await requestScysSearchTopic(page, {
+            pageIndex: 1,
+            pageSize: Math.max(limit, 30),
+            orderBy: 'gmt_create',
+            orderDirection: 'desc',
+            displayMode: 2,
+            pageScene: 'homePage',
+            isDigested: true,
+        }), limit, maxLength);
+    }
+    if (normalized.length === 0) {
+        await page.installInterceptor('shengcai-web/client');
+        await page.evaluate(`
     (async () => {
       const clean = (v) => (v || '').replace(/\\s+/g, ' ').trim();
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1138,54 +1293,14 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
       await sleep(300);
     })()
   `);
-    const intercepted = await page.getInterceptedRequests();
-    const latest = intercepted
-        .filter((entry) => {
-        const data = entry?.data;
-        return data && Array.isArray(data.items) && data.items.some((item) => item?.topicDTO);
-    })
-        .at(-1);
-    let normalized = [];
-    if (latest?.data?.items?.length) {
-        normalized = latest.data.items.slice(0, limit).map((item, index) => {
-            const topic = item?.topicDTO ?? {};
-            const user = item?.topicUserDTO ?? {};
-            const menuValues = Array.isArray(topic.menuList)
-                ? topic.menuList.map((m) => cleanText(m?.value)).filter(Boolean)
-                : [];
-            const tags = Array.from(new Set(menuValues.map((v) => polishScysText(v)).filter(Boolean)));
-            const topicId = cleanText(topic.topicId || topic.entityId);
-            const entityType = cleanText(topic.entityType || 'xq_topic');
-            const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
-                item?.detailUrl,
-                topic?.externalLink,
-            ]);
-            const images = Array.isArray(topic.imageList)
-                ? topic.imageList.map((u) => cleanText(u)).filter(Boolean)
-                : [];
-            const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
-            const flags = topic.isDigested ? ['精华'] : [];
-            const summary = trimWithLimit(stripScysRichText(topic.articleContent), maxLength);
-            return {
-                rank: index + 1,
-                author: polishScysText(user.name),
-                time: formatScysRelativeTime(topic.gmtCreate),
-                flags,
-                title: polishScysText(stripScysRichText(topic.showTitle)),
-                summary,
-                tags,
-                interactions,
-                interactions_display: interactions.display,
-                topic_id: topicId,
-                entity_type: entityType,
-                url: links.url,
-                raw_url: links.raw_url,
-                source_links: links.source_links,
-                external_links: links.external_links,
-                images,
-                image_count: images.length,
-            };
-        }).filter((row) => row.title || row.summary);
+        const intercepted = await page.getInterceptedRequests();
+        const candidates = intercepted
+            .map((entry) => entry?.data ?? entry)
+            .filter((data) => data && Array.isArray(data.items) && data.items.some((item) => item?.topicDTO));
+        const latest = candidates.at(-1);
+        if (latest?.items?.length) {
+            normalized = normalizeScysFeedApiRows(latest.items, limit, maxLength);
+        }
     }
     // DOM fallback for cases where interceptor is blocked or request timing misses.
     if (normalized.length === 0) {
@@ -1281,11 +1396,20 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
     const tab = normalizeOpportunityTab(opts.tab);
     await gotoAndWait(page, url, waitSeconds);
     await ensureScysLogin(page);
-    // API-first extraction. The page internally requests:
-    //   /shengcai-web/client/homePage/searchTopic
-    // We intercept this payload to get stable fields (time, tags, images, topic ids).
-    await page.installInterceptor('shengcai-web/client/homePage/searchTopic');
-    await page.evaluate(`
+    let normalized = normalizeScysOpportunityApiRows(await requestScysSearchTopic(page, {
+        pageIndex: 1,
+        pageSize: Math.max(limit, 20),
+        orderBy: 'gmt_create',
+        orderDirection: 'desc',
+        displayMode: 3,
+        sortKeyNeedDefaultGtZero: true,
+        pageScene: 'fxb',
+        sortKeyNeedDefaultGtNum: 10,
+        ...(tab.key === 'winning' ? { mustMenuIdList: [539] } : {}),
+    }), limit);
+    if (normalized.length === 0) {
+        await page.installInterceptor('shengcai-web/client/homePage/searchTopic');
+        await page.evaluate(`
     (async () => {
       const clean = (v) => (v || '').replace(/\\s+/g, ' ').trim();
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1313,56 +1437,14 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
       await sleep(800);
     })()
   `);
-    const intercepted = await page.getInterceptedRequests();
-    const latest = intercepted
-        .filter((entry) => {
-        const data = entry?.data;
-        return data && Array.isArray(data.items) && data.items.length > 0;
-    })
-        .at(-1);
-    let normalized = [];
-    if (latest?.data?.items?.length) {
-        normalized = latest.data.items.slice(0, limit).map((item, index) => {
-            const topic = item?.topicDTO ?? {};
-            const user = item?.topicUserDTO ?? {};
-            const menuValues = Array.isArray(topic.menuList)
-                ? topic.menuList.map((m) => cleanText(m?.value)).filter(Boolean)
-                : [];
-            const { flags, tags } = splitOpportunityFlagsAndTags(menuValues);
-            const interactions = buildScysInteractions(topic.likeCount, topic.commentsCount, topic.favoriteCount);
-            const entityType = cleanText(topic.entityType);
-            const topicId = cleanText(topic.topicId || topic.entityId);
-            const images = Array.isArray(topic.imageList)
-                ? topic.imageList.map((u) => cleanText(u)).filter(Boolean)
-                : [];
-            const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
-                item?.detailUrl,
-                topic?.externalLink,
-            ]);
-            const normalizedFlags = flags.map((f) => polishScysText(f)).filter(Boolean);
-            const normalizedTags = tags.map((t) => polishScysText(t)).filter(Boolean);
-            const summary = polishScysText(stripScysRichText(topic.articleContent));
-            return {
-                rank: index + 1,
-                author: polishScysText(user.name),
-                time: formatScysRelativeTime(topic.gmtCreate),
-                flags: normalizedFlags,
-                title: polishScysText(stripScysRichText(topic.showTitle)),
-                summary,
-                ai_summary: polishScysText(parseAiSummaryText(topic.aiSummaryContent)),
-                tags: normalizedTags,
-                interactions,
-                interactions_display: interactions.display,
-                url: links.url,
-                raw_url: links.raw_url,
-                topic_id: topicId,
-                entity_type: entityType,
-                source_links: links.source_links,
-                external_links: links.external_links,
-                images,
-                image_count: images.length,
-            };
-        });
+        const intercepted = await page.getInterceptedRequests();
+        const candidates = intercepted
+            .map((entry) => entry?.data ?? entry)
+            .filter((data) => data && Array.isArray(data.items) && data.items.length > 0);
+        const latest = candidates.at(-1);
+        if (latest?.items?.length) {
+            normalized = normalizeScysOpportunityApiRows(latest.items, limit);
+        }
     }
     // DOM fallback: keep the previous extractor as backup when the API payload is blocked.
     if (normalized.length === 0) {
