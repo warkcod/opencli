@@ -11,6 +11,8 @@ const SCYS_TEXT_FIXUPS = [
     [/\bcreen\s*haring\b/gi, 'screensharing'],
     [/\bfa\s*t3d\b/gi, 'fast3d'],
 ];
+const SCYS_SHELL_TITLES = new Set(['生财官网·会员主题贴']);
+const SCYS_TITLE_PREFIX_PATTERN = /^(?:精华|热门|中标|信息差|新玩法|市场洞察|风向标)\s*/;
 async function gotoAndWait(page, url, waitSeconds) {
     await page.goto(url);
     await page.wait(waitSeconds);
@@ -29,6 +31,157 @@ function pickPreferredScysLink(candidates) {
     if (internal)
         return internal;
     return links[0] ?? '';
+}
+function getScysArticleMetaFromUrl(url) {
+    const normalized = cleanText(url);
+    if (!/^https?:\/\/(?:www\.)?scys\.com\/articleDetail\//i.test(normalized)) {
+        return { entityType: '', topicId: '' };
+    }
+    try {
+        return extractScysArticleMeta(normalized);
+    }
+    catch {
+        return { entityType: '', topicId: '' };
+    }
+}
+function normalizeScysExternalLinks(candidates) {
+    return Array.from(new Set((candidates ?? [])
+        .map((value) => normalizeMaybeBrokenUrl(value))
+        .filter(isLikelyExternalLink)
+        .filter((href) => !isLikelyFalsePositiveLink(href))));
+}
+function buildScysListLinkFields(primaryUrl, entityType, topicId, linkCandidates) {
+    const internalUrl = buildScysTopicLink(entityType, topicId);
+    const url = pickPreferredScysLink([
+        internalUrl,
+        primaryUrl,
+        ...(linkCandidates ?? []),
+    ]);
+    const externalLinks = normalizeScysExternalLinks(linkCandidates);
+    return {
+        url,
+        raw_url: url,
+        source_links: externalLinks,
+        external_links: externalLinks,
+    };
+}
+function normalizeScysTitleKey(value) {
+    return polishScysText(stripScysRichText(value ?? ''))
+        .replace(SCYS_TITLE_PREFIX_PATTERN, '')
+        .replace(/\s+/g, '')
+        .replace(/[“”"'‘’#：:|·，。,！？!?\[\]()（）【】《》<>]/g, '')
+        .toLowerCase();
+}
+function normalizeScysCacheEntryLinks(entry) {
+    return [
+        ...(Array.isArray(entry?.links) ? entry.links : []),
+        ...(Array.isArray(entry?.feishu_links) ? entry.feishu_links : []),
+        ...(Array.isArray(entry?.source_links) ? entry.source_links : []),
+        ...(Array.isArray(entry?.external_links) ? entry.external_links : []),
+        entry?.externalLink,
+        entry?.external_link,
+        entry?.url,
+        entry?.raw_url,
+    ];
+}
+function normalizeScysPageCacheEntry(entry) {
+    if (!entry || typeof entry !== 'object')
+        return null;
+    const topicId = cleanText(entry.topic_id ?? entry.topicId ?? entry.entityId);
+    const meta = getScysArticleMetaFromUrl(entry.scys_url ?? entry.url ?? entry.raw_url ?? '');
+    const entityType = cleanText(entry.entity_type ?? entry.entityType ?? meta.entityType ?? (topicId ? 'xq_topic' : ''));
+    const detailUrl = pickPreferredScysLink([
+        entry.scys_url,
+        buildScysTopicLink(entityType, topicId || meta.topicId),
+        entry.url,
+        entry.raw_url,
+    ]);
+    const externalLinks = normalizeScysExternalLinks(normalizeScysCacheEntryLinks(entry));
+    return {
+        title: polishScysText(entry.title ?? ''),
+        topic_id: topicId || meta.topicId,
+        entity_type: entityType,
+        url: detailUrl,
+        raw_url: detailUrl,
+        source_links: externalLinks,
+        external_links: externalLinks,
+        author: polishScysText(entry.author ?? ''),
+        time: polishScysText(entry.time ?? ''),
+    };
+}
+function scoreScysCacheMatch(row, entry) {
+    let score = 0;
+    if (!entry)
+        return score;
+    if (cleanText(row.topic_id ?? '') && row.topic_id === entry.topic_id)
+        score += 120;
+    const rowExternal = normalizeScysExternalLinks([
+        ...(row.external_links ?? []),
+        ...(row.source_links ?? []),
+        row.url,
+        row.raw_url,
+    ]);
+    if (rowExternal.some((href) => entry.external_links.includes(href)))
+        score += 80;
+    const rowUrlMeta = getScysArticleMetaFromUrl(row.url ?? row.raw_url ?? '');
+    if (rowUrlMeta.topicId && rowUrlMeta.topicId === entry.topic_id)
+        score += 60;
+    const rowTitleKey = normalizeScysTitleKey(row.title ?? '');
+    const entryTitleKey = normalizeScysTitleKey(entry.title ?? '');
+    if (rowTitleKey && entryTitleKey) {
+        if (rowTitleKey === entryTitleKey) {
+            score += 50;
+        }
+        else if (rowTitleKey.includes(entryTitleKey) || entryTitleKey.includes(rowTitleKey)) {
+            score += 35;
+        }
+    }
+    const rowSummaryKey = normalizeScysTitleKey(row.summary ?? '');
+    if (rowSummaryKey && entryTitleKey && rowSummaryKey.includes(entryTitleKey))
+        score += 20;
+    return score;
+}
+function enrichScysListRows(rows, cacheEntries) {
+    const normalizedCache = (cacheEntries ?? [])
+        .map((entry) => normalizeScysPageCacheEntry(entry))
+        .filter(Boolean);
+    if (normalizedCache.length === 0)
+        return rows;
+    return rows.map((row) => {
+        let best = null;
+        let bestScore = 0;
+        for (const entry of normalizedCache) {
+            const score = scoreScysCacheMatch(row, entry);
+            if (score > bestScore) {
+                best = entry;
+                bestScore = score;
+            }
+        }
+        const existingMeta = getScysArticleMetaFromUrl(row.url ?? row.raw_url ?? '');
+        const topicId = cleanText(row.topic_id || existingMeta.topicId || best?.topic_id || '');
+        const entityType = cleanText(row.entity_type || existingMeta.entityType || best?.entity_type || (topicId ? 'xq_topic' : ''));
+        const links = buildScysListLinkFields(row.url ?? row.raw_url ?? best?.url ?? '', entityType, topicId, [
+            ...(row.source_links ?? []),
+            ...(row.external_links ?? []),
+            row.url,
+            row.raw_url,
+            ...(best?.source_links ?? []),
+            ...(best?.external_links ?? []),
+            best?.url,
+            best?.raw_url,
+        ]);
+        return {
+            ...row,
+            author: row.author || best?.author || '',
+            time: row.time || best?.time || '',
+            topic_id: topicId,
+            entity_type: entityType,
+            url: links.url || row.url || best?.url || '',
+            raw_url: links.raw_url || row.raw_url || best?.raw_url || '',
+            source_links: links.source_links,
+            external_links: links.external_links,
+        };
+    });
 }
 function parseCnNumberToken(token) {
     const raw = cleanText(token);
@@ -586,41 +739,99 @@ export async function ensureScysLogin(page) {
         throw new AuthRequiredError(SCYS_DOMAIN, 'SCYS content requires a logged-in browser session');
     }
 }
-export async function extractScysCourse(page, inputUrl, opts = {}) {
-    return extractScysCourseSingle(page, inputUrl, opts);
+async function captureScysPageCache(page) {
+    const entries = await page.evaluate(`
+    (() => {
+      const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+      const normalizeUrl = (value) => clean(value).replace(/\\s+/g, '');
+      const abs = (href) => {
+        const raw = normalizeUrl(href);
+        if (!raw) return '';
+        if (raw.startsWith('http://') || raw.startsWith('https://')) return raw;
+        if (raw.startsWith('/')) return location.origin + raw;
+        return '';
+      };
+      const uniq = (list) => Array.from(new Set(list.filter(Boolean)));
+      const shouldParseStorageValue = (value) =>
+        typeof value === 'string' && /(topicId|entityId|showTitle|articleContent|topicDTO|articleDetail|scys_url)/.test(value);
+      const collectStorageRoots = (storage) => {
+        const out = [];
+        if (!storage) return out;
+        for (let i = 0; i < storage.length; i += 1) {
+          const key = storage.key(i);
+          if (!key) continue;
+          const raw = storage.getItem(key);
+          if (!shouldParseStorageValue(raw)) continue;
+          try {
+            out.push(JSON.parse(raw));
+          } catch {
+            // Ignore non-JSON blobs.
+          }
+        }
+        return out;
+      };
+      const roots = [
+        window.__NUXT__,
+        window.__INITIAL_STATE__,
+        window.__NEXT_DATA__,
+        window.$nuxt && window.$nuxt.$store && window.$nuxt.$store.state,
+        window.$nuxt && window.$nuxt.context && window.$nuxt.context.store && window.$nuxt.context.store.state,
+        window.__PINIA__ && window.__PINIA__.state && window.__PINIA__.state.value,
+        ...collectStorageRoots(window.localStorage),
+        ...collectStorageRoots(window.sessionStorage),
+      ].filter(Boolean);
+      const seen = new WeakSet();
+      const out = [];
+      const urlPattern = /https?:\\/\\/[^\\s"'<>]+/g;
+      const visit = (value, depth = 0) => {
+        if (!value || typeof value !== 'object' || depth > 7) return;
+        if (seen.has(value)) return;
+        seen.add(value);
+        if (Array.isArray(value)) {
+          value.forEach((item) => visit(item, depth + 1));
+          return;
+        }
+
+        const topic = value.topicDTO && typeof value.topicDTO === 'object' ? value.topicDTO : value;
+        const topicId = clean(topic.topicId || topic.entityId || value.topic_id || value.topicId || '');
+        const entityType = clean(topic.entityType || value.entity_type || value.entityType || (topicId ? 'xq_topic' : ''));
+        const title = clean(topic.showTitle || topic.title || value.title || '');
+        const articleContent = String(topic.articleContent || value.content_preview || value.content || '');
+        const rawLinks = [
+          ...(Array.isArray(value.links) ? value.links : []),
+          ...(Array.isArray(value.feishu_links) ? value.feishu_links : []),
+          ...(Array.isArray(value.source_links) ? value.source_links : []),
+          ...(Array.isArray(value.external_links) ? value.external_links : []),
+          topic.externalLink,
+          value.externalLink,
+          value.url,
+          value.raw_url,
+        ];
+        const inlineLinks = Array.from(articleContent.match(urlPattern) || []);
+        const links = uniq([...rawLinks, ...inlineLinks].map((item) => abs(item)).filter(Boolean));
+        const scysUrl = abs(value.scys_url || value.detailUrl || (topicId && entityType ? '/articleDetail/' + entityType + '/' + topicId : ''));
+        if ((topicId || scysUrl) && (title || articleContent || links.length > 0)) {
+          out.push({
+            title,
+            topic_id: topicId,
+            entity_type: entityType,
+            scys_url: scysUrl,
+            links,
+            author: clean(value.author || value.nickname || value.name || ''),
+            time: clean(value.time || ''),
+          });
+        }
+
+        Object.values(value).forEach((child) => visit(child, depth + 1));
+      };
+      roots.forEach((root) => visit(root, 0));
+      return out;
+    })()
+  `);
+    return Array.isArray(entries) ? entries : [];
 }
-export async function extractScysCourseAll(page, inputUrl, opts = {}) {
-    const tocRows = await extractScysToc(page, inputUrl, opts);
-    const urls = buildScysCourseChapterUrls(inputUrl, tocRows);
-    if (urls.length === 0) {
-        throw new EmptyResultError('scys/course', 'No chapter ids were detected for deterministic full-course export');
-    }
-    const out = [];
-    for (const url of urls) {
-        out.push(await extractScysCourseSingle(page, url, { ...opts, tocRows }));
-    }
-    return out;
-}
-export async function extractScysToc(page, courseInput, opts = {}) {
-    const url = toScysCourseUrl(courseInput);
-    const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 2));
-    await gotoAndWait(page, url, waitSeconds);
-    await ensureScysLogin(page);
-    const normalized = await evaluateScysTocRows(page, { expandCollapsedSections: true });
-    if (normalized.length === 0) {
-        await ensureScysLogin(page);
-        throw new EmptyResultError('scys/toc', 'No chapter list was detected on this course page. If your SCYS browser session expired, reopen scys.com in Chrome, log in again, then retry.');
-    }
-    return normalized;
-}
-export async function extractScysArticle(page, inputUrl, opts = {}) {
-    const url = toScysArticleUrl(inputUrl);
-    const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 5));
-    const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
-    const fromUrl = extractScysArticleMeta(url);
-    await gotoAndWait(page, url, waitSeconds);
-    await ensureScysLogin(page);
-    const payload = await page.evaluate(`
+async function readScysArticlePayload(page) {
+    return page.evaluate(`
     (() => {
       const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
       const normalizeUrl = (value) => clean(value).replace(/\\s+/g, '');
@@ -740,6 +951,75 @@ export async function extractScysArticle(page, inputUrl, opts = {}) {
       };
     })()
   `);
+}
+function isShellScysTitle(value) {
+    return SCYS_SHELL_TITLES.has(cleanText(value));
+}
+function isScysArticleHydrated(payload) {
+    if (!payload)
+        return false;
+    const title = cleanText(payload.title);
+    const content = cleanText(payload.content);
+    const aiSummary = cleanText(payload.aiSummary);
+    const author = cleanText(payload.author);
+    const time = cleanText(payload.time);
+    const sourceLinks = Array.isArray(payload.sourceLinks) ? payload.sourceLinks.filter(Boolean) : [];
+    const images = Array.isArray(payload.images) ? payload.images.filter(Boolean) : [];
+    if (!title && !content && !aiSummary)
+        return false;
+    if (isShellScysTitle(title) && !content && !aiSummary && !author && !time && sourceLinks.length === 0 && images.length === 0) {
+        return false;
+    }
+    return true;
+}
+async function waitForScysArticlePayload(page, attempts = 3) {
+    let lastPayload = null;
+    for (let index = 0; index < attempts; index += 1) {
+        const payload = await readScysArticlePayload(page);
+        lastPayload = payload;
+        if (isScysArticleHydrated(payload))
+            return payload;
+        if (index < attempts - 1) {
+            await page.wait(1);
+        }
+    }
+    return lastPayload;
+}
+export async function extractScysCourse(page, inputUrl, opts = {}) {
+    return extractScysCourseSingle(page, inputUrl, opts);
+}
+export async function extractScysCourseAll(page, inputUrl, opts = {}) {
+    const tocRows = await extractScysToc(page, inputUrl, opts);
+    const urls = buildScysCourseChapterUrls(inputUrl, tocRows);
+    if (urls.length === 0) {
+        throw new EmptyResultError('scys/course', 'No chapter ids were detected for deterministic full-course export');
+    }
+    const out = [];
+    for (const url of urls) {
+        out.push(await extractScysCourseSingle(page, url, { ...opts, tocRows }));
+    }
+    return out;
+}
+export async function extractScysToc(page, courseInput, opts = {}) {
+    const url = toScysCourseUrl(courseInput);
+    const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 2));
+    await gotoAndWait(page, url, waitSeconds);
+    await ensureScysLogin(page);
+    const normalized = await evaluateScysTocRows(page, { expandCollapsedSections: true });
+    if (normalized.length === 0) {
+        await ensureScysLogin(page);
+        throw new EmptyResultError('scys/toc', 'No chapter list was detected on this course page. If your SCYS browser session expired, reopen scys.com in Chrome, log in again, then retry.');
+    }
+    return normalized;
+}
+export async function extractScysArticle(page, inputUrl, opts = {}) {
+    const url = toScysArticleUrl(inputUrl);
+    const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 5));
+    const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
+    const fromUrl = extractScysArticleMeta(url);
+    await gotoAndWait(page, url, waitSeconds);
+    await ensureScysLogin(page);
+    const payload = await waitForScysArticlePayload(page, 3);
     if (!payload) {
         throw new EmptyResultError('scys/article', 'Failed to extract article detail page');
     }
@@ -768,6 +1048,9 @@ export async function extractScysArticle(page, inputUrl, opts = {}) {
     const aiSummary = polishScysText(stripScysRichText(payload.aiSummary ?? '')).slice(0, maxLength);
     const title = polishScysText(payload.title ?? '');
     const author = polishScysText(payload.author ?? '');
+    if (isShellScysTitle(title) && !content && !aiSummary && !author && !cleanText(payload.time ?? '') && sourceLinks.length === 0 && images.length === 0) {
+        throw new EmptyResultError('scys/article', 'Article detail page did not hydrate beyond shell content');
+    }
     if (!title && !content && !aiSummary) {
         throw new EmptyResultError('scys/article', 'No title/content was detected on this article page');
     }
@@ -866,9 +1149,8 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
             const tags = Array.from(new Set(menuValues.map((v) => polishScysText(v)).filter(Boolean)));
             const topicId = cleanText(topic.topicId || topic.entityId);
             const entityType = cleanText(topic.entityType || 'xq_topic');
-            const url = pickPreferredScysLink([
+            const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
                 item?.detailUrl,
-                buildScysTopicLink(entityType, topicId),
                 topic?.externalLink,
             ]);
             const images = Array.isArray(topic.imageList)
@@ -887,8 +1169,12 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
                 tags,
                 interactions,
                 interactions_display: interactions.display,
-                url,
-                raw_url: url,
+                topic_id: topicId,
+                entity_type: entityType,
+                url: links.url,
+                raw_url: links.raw_url,
+                source_links: links.source_links,
+                external_links: links.external_links,
                 images,
                 image_count: images.length,
             };
@@ -951,7 +1237,9 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
             const flags = row.badge ? [polishScysText(row.badge)] : [];
             const summary = trimWithLimit(row.preview ?? '', maxLength);
             const interactions = buildScysInteractions(undefined, undefined, undefined, row.interactions || row.meta_line);
-            const url = pickPreferredScysLink(row.links ?? []);
+            const preferredUrl = pickPreferredScysLink(row.links ?? []);
+            const meta = getScysArticleMetaFromUrl(preferredUrl);
+            const links = buildScysListLinkFields(preferredUrl, meta.entityType, meta.topicId, row.links ?? []);
             return {
                 rank: index + 1,
                 author: polishScysText(row.author ?? authorByLine),
@@ -962,13 +1250,18 @@ export async function extractScysFeed(page, inputUrl, opts = {}) {
                 tags,
                 interactions,
                 interactions_display: interactions.display,
-                url,
-                raw_url: url,
+                topic_id: meta.topicId,
+                entity_type: meta.entityType,
+                url: links.url,
+                raw_url: links.raw_url,
+                source_links: links.source_links,
+                external_links: links.external_links,
                 images: [],
                 image_count: 0,
             };
         }).filter((row) => row.title || row.summary);
     }
+    normalized = enrichScysListRows(normalized, await captureScysPageCache(page));
     if (normalized.length === 0) {
         throw new EmptyResultError('scys/feed', 'No feed cards were detected on this page');
     }
@@ -1035,7 +1328,10 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
             const images = Array.isArray(topic.imageList)
                 ? topic.imageList.map((u) => cleanText(u)).filter(Boolean)
                 : [];
-            const url = cleanText(item.detailUrl) || buildScysTopicLink(entityType, topicId);
+            const links = buildScysListLinkFields(item?.detailUrl, entityType, topicId, [
+                item?.detailUrl,
+                topic?.externalLink,
+            ]);
             const normalizedFlags = flags.map((f) => polishScysText(f)).filter(Boolean);
             const normalizedTags = tags.map((t) => polishScysText(t)).filter(Boolean);
             const summary = polishScysText(stripScysRichText(topic.articleContent));
@@ -1050,10 +1346,12 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
                 tags: normalizedTags,
                 interactions,
                 interactions_display: interactions.display,
-                url,
-                raw_url: url,
+                url: links.url,
+                raw_url: links.raw_url,
                 topic_id: topicId,
                 entity_type: entityType,
+                source_links: links.source_links,
+                external_links: links.external_links,
                 images,
                 image_count: images.length,
             };
@@ -1096,11 +1394,15 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
     `);
         normalized = (rows ?? []).slice(0, limit).map((row, index) => {
             const images = (row.image_urls ?? []).map((u) => cleanText(u)).filter(Boolean);
-            const topicId = inferTopicIdFromImageUrls(images);
+            const inferredTopicId = inferTopicIdFromImageUrls(images);
+            const preferredUrl = cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', inferredTopicId);
+            const meta = getScysArticleMetaFromUrl(preferredUrl);
+            const topicId = cleanText(meta.topicId || inferredTopicId);
+            const entityType = cleanText(meta.entityType || (topicId ? 'xq_topic' : ''));
             const tags = Array.from(new Set((row.tags ?? []).map((tag) => cleanText(tag)).filter(Boolean)));
             const interactions = buildScysInteractions(undefined, undefined, undefined, row.interactions ?? '');
             const summary = polishScysText(stripScysRichText(row.content ?? ''));
-            const url = cleanText(row.link ?? '') || buildScysTopicLink('xq_topic', topicId);
+            const links = buildScysListLinkFields(preferredUrl, entityType, topicId, [row.link ?? '']);
             const normalizedFlags = (row.flags ?? []).map((f) => polishScysText(f)).filter(Boolean);
             return {
                 rank: index + 1,
@@ -1113,15 +1415,18 @@ export async function extractScysOpportunity(page, inputUrl, opts = {}) {
                 tags: tags.map((tag) => polishScysText(tag)).filter(Boolean),
                 interactions,
                 interactions_display: interactions.display,
-                url,
-                raw_url: url,
+                url: links.url,
+                raw_url: links.raw_url,
                 topic_id: topicId,
-                entity_type: topicId ? 'xq_topic' : '',
+                entity_type: entityType,
+                source_links: links.source_links,
+                external_links: links.external_links,
                 images,
                 image_count: images.length,
             };
         });
     }
+    normalized = enrichScysListRows(normalized, await captureScysPageCache(page));
     if (normalized.length === 0) {
         throw new EmptyResultError('scys/opportunity', 'No opportunity cards were detected on this page');
     }
