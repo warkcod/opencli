@@ -1,5 +1,14 @@
+import { EmptyResultError } from '@jackwener/opencli/errors';
 import { cli, Strategy } from '@jackwener/opencli/registry';
 import { extractScysArticle } from './extractors.js';
+
+function isRetryableScysArticleError(error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return error instanceof EmptyResultError
+        || /stale page identity/i.test(message)
+        || /Page not found:/i.test(message)
+        || /Article detail page did not hydrate beyond shell content/i.test(message);
+}
 cli({
     site: 'scys',
     name: 'article',
@@ -14,9 +23,26 @@ cli({
     ],
     columns: ['topic_id', 'entity_type', 'title', 'author', 'time', 'tags', 'flags', 'image_count', 'external_link_count', 'content', 'ai_summary', 'url'],
     func: async (page, kwargs) => {
-        return extractScysArticle(page, String(kwargs.url), {
+        const url = String(kwargs.url);
+        const options = {
             waitSeconds: Number(kwargs.wait ?? 5),
             maxLength: Number(kwargs['max-length'] ?? 4000),
-        });
+        };
+        let lastError = null;
+        const maxAttempts = 5;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            try {
+                return await extractScysArticle(page, url, options);
+            } catch (error) {
+                lastError = error;
+                if (!isRetryableScysArticleError(error) || attempt === maxAttempts) {
+                    throw error;
+                }
+                // A full window reset is closer to the successful manual re-run path
+                // than another probe inside the same browser state.
+                await page.closeWindow?.().catch(() => { });
+            }
+        }
+        throw lastError;
     },
 });

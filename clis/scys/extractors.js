@@ -1133,6 +1133,29 @@ async function waitForScysArticlePayload(page, attempts = 3) {
     }
     return lastPayload;
 }
+async function resolveScysArticlePayload(page, url, waitSeconds) {
+    let payload = null;
+    const maxRounds = 3;
+    const retryWaitSeconds = Math.max(1, Math.min(waitSeconds, 2));
+    for (let round = 0; round < maxRounds; round += 1) {
+        payload = await waitForScysArticlePayload(page, 3);
+        if (isScysArticleHydrated(payload)) {
+            return payload;
+        }
+        if (round < maxRounds - 1) {
+            // A same-URL goto can be short-circuited by the browser bridge.
+            // Bounce through the SCYS home page first so the article route
+            // really re-enters and triggers a fresh hydrate.
+            await gotoAndWait(page, 'https://scys.com/', 1);
+            await ensureScysLogin(page);
+            const separator = url.includes('?') ? '&' : '?';
+            const retryUrl = `${url}${separator}_opencli_retry=${Date.now()}_${round + 1}`;
+            await gotoAndWait(page, retryUrl, retryWaitSeconds);
+            await ensureScysLogin(page);
+        }
+    }
+    return payload;
+}
 export async function extractScysCourse(page, inputUrl, opts = {}) {
     return extractScysCourseSingle(page, inputUrl, opts);
 }
@@ -1161,13 +1184,14 @@ export async function extractScysToc(page, courseInput, opts = {}) {
     return normalized;
 }
 export async function extractScysArticle(page, inputUrl, opts = {}) {
-    const url = toScysArticleUrl(inputUrl);
+    const requestedUrl = toScysArticleUrl(inputUrl);
+    const url = requestedUrl.replace(/[?#].*$/, '');
     const waitSeconds = Math.max(1, Number(opts.waitSeconds ?? 5));
     const maxLength = Math.max(300, Number(opts.maxLength ?? 4000));
     const fromUrl = extractScysArticleMeta(url);
     await gotoAndWait(page, url, waitSeconds);
     await ensureScysLogin(page);
-    const payload = await waitForScysArticlePayload(page, 3);
+    const payload = await resolveScysArticlePayload(page, url, waitSeconds);
     if (!payload) {
         throw new EmptyResultError('scys/article', 'Failed to extract article detail page');
     }

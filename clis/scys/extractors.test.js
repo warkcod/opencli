@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { extractScysArticle, extractScysFeed, extractScysOpportunity } from './extractors.js';
 
 function createScysPageMock({
@@ -9,7 +9,7 @@ function createScysPageMock({
 } = {}) {
     const queue = [...evaluateResults];
     return {
-        goto: async () => {},
+        goto: vi.fn(async () => {}),
         wait: async () => {},
         evaluate: async (js) => {
             if (js.includes('const text = (document.body?.innerText ||') && js.includes('hasContentSignals')) {
@@ -272,7 +272,7 @@ describe('extractScysOpportunity', () => {
 });
 
 describe('extractScysArticle', () => {
-    it('waits past shell placeholders and returns hydrated article content', async () => {
+  it('waits past shell placeholders and returns hydrated article content', async () => {
         const page = createScysPageMock({
             evaluateResults: [
                 {
@@ -344,6 +344,98 @@ describe('extractScysArticle', () => {
             content: '工具推荐 kikivoice.ai 这是一个免费克隆音频的网站',
             external_links: ['https://kikivoice.ai'],
             source_links: ['https://kikivoice.ai'],
+        });
+    });
+
+    it('re-navigates once when the article stays on shell content and then succeeds', async () => {
+        const page = createScysPageMock({
+            evaluateResults: [
+                {
+                    entityType: 'xq_topic',
+                    topicId: '14422288551185512',
+                    title: '生财官网·会员主题贴',
+                    author: '',
+                    time: '',
+                    flags: [],
+                    tags: [],
+                    content: '',
+                    aiSummary: '',
+                    likeText: '',
+                    commentText: '',
+                    favoriteText: '',
+                    images: [],
+                    sourceLinks: [],
+                    externalLinks: [],
+                    pageUrl: 'https://scys.com/articleDetail/xq_topic/14422288551185512',
+                },
+                {
+                    entityType: 'xq_topic',
+                    topicId: '14422288551185512',
+                    title: '生财官网·会员主题贴',
+                    author: '',
+                    time: '',
+                    flags: [],
+                    tags: [],
+                    content: '',
+                    aiSummary: '',
+                    likeText: '',
+                    commentText: '',
+                    favoriteText: '',
+                    images: [],
+                    sourceLinks: [],
+                    externalLinks: [],
+                    pageUrl: 'https://scys.com/articleDetail/xq_topic/14422288551185512',
+                },
+                {
+                    entityType: 'xq_topic',
+                    topicId: '14422288551185512',
+                    title: '生财官网·会员主题贴',
+                    author: '',
+                    time: '',
+                    flags: [],
+                    tags: [],
+                    content: '',
+                    aiSummary: '',
+                    likeText: '',
+                    commentText: '',
+                    favoriteText: '',
+                    images: [],
+                    sourceLinks: [],
+                    externalLinks: [],
+                    pageUrl: 'https://scys.com/articleDetail/xq_topic/14422288551185512',
+                },
+                {
+                    entityType: 'xq_topic',
+                    topicId: '14422288551185512',
+                    title: 'Youtube复盘：从5个月颗粒无收到3个月开通3个高级YPP，1.7亿播放',
+                    author: '加一',
+                    time: '2026-04-17 12:34',
+                    flags: ['项目实操'],
+                    tags: ['YouTube'],
+                    content: '这是一次 Youtube 复盘。',
+                    aiSummary: '一次关于 YouTube 变现的复盘总结。',
+                    likeText: '88',
+                    commentText: '12',
+                    favoriteText: '6',
+                    images: [],
+                    sourceLinks: [],
+                    externalLinks: [],
+                    pageUrl: 'https://scys.com/articleDetail/xq_topic/14422288551185512',
+                },
+            ],
+        });
+
+        const result = await extractScysArticle(page, 'https://scys.com/articleDetail/xq_topic/14422288551185512', {
+            waitSeconds: 1,
+            maxLength: 4000,
+        });
+
+        expect(page.goto).toHaveBeenCalledTimes(3);
+        expect(result).toMatchObject({
+            topic_id: '14422288551185512',
+            title: 'Youtube复盘：从5个月颗粒无收到3个月开通3个高级YPP，1.7亿播放',
+            author: '加一',
+            content: '这是一次 Youtube 复盘。',
         });
     });
 });
